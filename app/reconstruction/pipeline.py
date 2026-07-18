@@ -1,23 +1,31 @@
-from app.reconstruction.openmvg import run_openmvg
-from app.reconstruction.openmvs import run_openmvs
+from app.reconstruction.colmap import run_colmap
 from app.reconstruction.converter import convert_to_glb
 
+
 def run_pipeline():
+    try:
+        print("=" * 60)
+        print("Starting 3D Reconstruction Pipeline")
+        print("=" * 60)
 
-    print("Running OpenMVG...")
+        # COLMAP + OpenMVS
+        mesh = run_colmap()
+        print("=" * 60)
+        print("Returned mesh:", mesh)
+        print("=" * 60)
+        print("\nConverting mesh to GLB...\n")
 
-    sparse = run_openmvg()
+        glb = convert_to_glb(mesh)
 
-    print("Running OpenMVS...")
+        print("\nPipeline completed successfully.\n")
 
-    mesh = run_openmvs(sparse)
+        return {
+            "success": True,
+            "mesh": mesh,
+            "glb": glb,
+        }
 
-    print("Converting...")
-
-    glb = convert_to_glb(mesh)
-
-    return {
-        "sparse": sparse,
-        "mesh": mesh,
-        "glb": glb
-    }
+    except Exception as e:
+        print("\nPipeline failed!")
+        print(e)
+        raise
