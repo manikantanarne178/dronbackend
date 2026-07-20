@@ -121,57 +121,51 @@ def generate_unique_filename(extension: str) -> str:
 
 async def save_upload(file: _UploadFile) -> dict:
     """
-    Validate and persist a single UploadFile to the uploads directory.
+    Validate and save an uploaded image.
 
-    Steps:
-        1. Check that the file is not empty (has a filename).
-        2. Validate the file extension.
-        3. Validate the MIME content-type.
-        4. Read the file in chunks, enforcing the MAX_FILE_SIZE limit.
-        5. Write chunks to disk asynchronously via aiofiles.
-
-    Returns a dict with `original_name, ``saved_name, and ``size_bytes`.
+    Returns metadata that will later be stored in the project report.
     """
-    # --- validation ----------------------------------------------------------
+
     validate_not_empty(file)
+
     extension = validate_file_extension(file.filename)
+
     validate_content_type(file)
 
-    # --- generate unique name ------------------------------------------------
     saved_name = generate_unique_filename(extension)
+
     file_path = UPLOAD_DIR / saved_name
 
-    # --- stream to disk with size guard --------------------------------------
     total_bytes = 0
+
     async with aiofiles.open(file_path, "wb") as out:
+
         while True:
+
             chunk = await file.read(CHUNK_SIZE)
+
             if not chunk:
                 break
+
             total_bytes += len(chunk)
+
             if total_bytes > MAX_FILE_SIZE:
-                # Clean up the partially-written file
                 await out.close()
-                file_path.unlink(missing_ok=True)
+
+                if file_path.exists():
+                    file_path.unlink()
+
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=(
-                        f"File '{file.filename}' exceeds the maximum allowed "
-                        f"size of {MAX_FILE_SIZE // (1024 * 1024)} MB."
-                    ),
+                    detail=f"{file.filename} exceeds 10 MB limit.",
                 )
-            await out.write(chunk)
 
-    # Reject zero-byte files that passed the filename check
-    if total_bytes == 0:
-        file_path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File '{file.filename}' is empty (0 bytes).",
-        )
+            await out.write(chunk)
 
     return {
         "original_name": file.filename,
         "saved_name": saved_name,
+        "content_type": file.content_type,
         "size_bytes": total_bytes,
+        "path": str(file_path),
     }

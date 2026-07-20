@@ -6,10 +6,11 @@ Provides:
 """
 
 from typing import List
+import shutil
 
 from fastapi import APIRouter, File, HTTPException, status, UploadFile as FastAPIUploadFile
 
-from app.utils import save_upload
+from app.utils import save_upload, UPLOAD_DIR
 
 router = APIRouter(
     prefix="/api/upload",
@@ -17,45 +18,61 @@ router = APIRouter(
 )
 
 
-# ===========================================================================
-# POST – Upload one or more images
-# ===========================================================================
 @router.post(
     "/images",
     summary="Upload image(s)",
-    description=(
-        "Upload one or more image files (jpg, jpeg, png, webp). "
-        "Each file is saved with a unique UUID filename so that repeated "
-        "uploads never overwrite previous files."
-    ),
     status_code=status.HTTP_200_OK,
 )
 async def upload_images(
-    files: List[FastAPIUploadFile] = File(
-        ...,
-        description="One or more image files to upload (jpg, jpeg, png, webp).",
-    ),
+    files: List[FastAPIUploadFile] = File(...),
 ):
-    """
-    Accept one or multiple image files via multipart/form-data.
-
-    - Validates each file's extension and MIME type.
-    - Rejects empty uploads and oversized files (>10 MB).
-    - Saves each file with a unique UUID-based filename.
-    - Returns metadata for every successfully saved file.
-    """
-    # Guard: reject requests with an empty file list
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No files were provided. Please select at least one image.",
+            detail="No files were provided.",
         )
 
-    uploaded: list[dict] = []
+    # -------------------------------------------------
+    # Clear previous uploaded images
+    # -------------------------------------------------
+    if UPLOAD_DIR.exists():
+        shutil.rmtree(UPLOAD_DIR)
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------------------------------
+    # Debug: Print received files
+    # -------------------------------------------------
+    print("\n==============================")
+    print("UPLOAD API CALLED")
+    print("==============================")
+
+    print(f"Received {len(files)} file(s):")
+
+    for i, file in enumerate(files, start=1):
+        print(f"{i}. {file.filename}")
+
+    # -------------------------------------------------
+    # Save uploaded images
+    # -------------------------------------------------
+    uploaded = []
 
     for file in files:
         result = await save_upload(file)
         uploaded.append(result)
+
+    # -------------------------------------------------
+    # Debug: Verify upload folder
+    # -------------------------------------------------
+    print("\nFiles saved in upload folder:")
+
+    saved_files = list(UPLOAD_DIR.iterdir())
+
+    for f in saved_files:
+        print(f.name)
+
+    print(f"Total saved: {len(saved_files)}")
+    print("==============================\n")
 
     return {
         "success": True,

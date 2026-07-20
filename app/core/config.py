@@ -1,6 +1,6 @@
 from dotenv import load_dotenv
 import os
-
+from pathlib import Path
 load_dotenv()
 
 class Settings:
@@ -12,5 +12,13 @@ class Settings:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
     SECRET_KEY = os.getenv("SECRET_KEY")
+    BASE_DIR = Path(__file__).resolve().parent.parent
 
+    UPLOAD_DIR = BASE_DIR / "uploads" / "images"
+
+    OUTPUT_DIR = BASE_DIR / "outputs"
+
+    PROJECTS_DIR = OUTPUT_DIR / "projects"
+
+    REPORTS_DIR = OUTPUT_DIR / "reports"
 settings = Settings()

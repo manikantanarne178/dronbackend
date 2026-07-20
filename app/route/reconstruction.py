@@ -10,9 +10,6 @@ router = APIRouter(
     tags=["Reconstruction"]
 )
 
-# Final GLB location
-MODEL_PATH = Path("app/outputs/model.glb")
-
 
 @router.post("/generate")
 async def generate_model():
@@ -20,23 +17,30 @@ async def generate_model():
     result = run_pipeline()
 
     return {
-    "status": "success",
-    "message": "3D model generated successfully",
-    "model_url": "/api/reconstruction/model"
-}
+        "status": "success",
+        "message": "3D reconstruction completed successfully.",
+        "project_id": result["project_id"],
+        "model_url": f"/api/reconstruction/model/{result['project_id']}",
+        "report_url": f"/api/report/download/{result['project_id']}",
+        "statistics": result["statistics"],
+    }
 
 
-@router.get("/model")
-async def get_model():
+@router.get("/model/{project_id}")
+async def get_model(project_id: str):
 
-    if not MODEL_PATH.exists():
+    model = Path(
+        f"app/outputs/projects/{project_id}/model.glb"
+    )
+
+    if not model.exists():
         raise HTTPException(
             status_code=404,
-            detail="No model has been generated yet."
+            detail="Model not found.",
         )
 
     return FileResponse(
-        path=MODEL_PATH,
+        path=model,
         media_type="model/gltf-binary",
-        filename="model.glb"
+        filename="model.glb",
     )
