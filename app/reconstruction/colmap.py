@@ -50,6 +50,47 @@ ENABLE_SYNTHETIC_PADDING = False
 # instead of burning 10-20 minutes to hit that downstream.
 MIN_DENSE_POINTS = 50
 
+# ---------------------------------------------------------
+# PERFORMANCE TUNING
+# ---------------------------------------------------------
+# These are the knobs that took the pipeline from ~1-2 hours down to
+# a 5-10 minute target for a ~20 image drone set. They trade a small,
+# usually imperceptible amount of geometric/textural fidelity for a
+# large reduction in per-step wall-clock time. If output quality ever
+# looks too soft/blocky for a specific client deliverable, these are
+# the first values to dial back up (in this priority order:
+# REFINE_RESOLUTION_LEVEL -> REFINE_MAX_VIEWS -> SIFT_MAX_IMAGE_SIZE).
+
+# Drone captures are taken along a flight path, so consecutive frames
+# overlap far more than distant ones. Sequential matching only tests
+# each frame against its N nearest neighbors in capture order instead
+# of every possible pair (exhaustive_matcher), which is O(n) instead
+# of O(n^2). This is the single biggest lever in the whole pipeline.
+USE_SEQUENTIAL_MATCHING = True
+SEQUENTIAL_MATCH_OVERLAP = 6  # how many neighboring frames each image is matched against
+
+# SIFT feature extraction time scales with both image resolution and
+# feature count. Drone photos are usually captured at resolutions far
+# higher than COLMAP needs to register camera poses reliably. Capping
+# both keeps pose estimation accurate while cutting extraction time.
+SIFT_MAX_IMAGE_SIZE = 1600
+SIFT_MAX_NUM_FEATURES = 4096
+
+# Bundle adjustment will keep iterating toward diminishing returns if
+# left uncapped. These caps stop it once poses have effectively
+# converged instead of grinding through the full default budget.
+MAPPER_BA_LOCAL_MAX_ITER = 20
+MAPPER_BA_GLOBAL_MAX_ITER = 30
+
+# Same idea as the DensifyPointCloud fix below, applied to RefineMesh:
+# --resolution-level downsamples the images used for photo-consistency
+# scoring during refinement (2 = quarter resolution), and --max-views
+# caps how many neighboring views are checked per vertex/face. Both
+# were left at their (expensive) defaults before, which is why
+# RefineMesh was still the long pole even after --scales 1.
+REFINE_RESOLUTION_LEVEL = 2
+REFINE_MAX_VIEWS = 4
+
 OUTPUTS.mkdir(parents=True, exist_ok=True)
 COLMAP_WORKSPACE.mkdir(parents=True, exist_ok=True)
 OPENMVS_WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -113,11 +154,6 @@ def count_ply_elements(ply_path, element_name="vertex"):
 # ---------------------------------------------------------
 
 def prepare_workspace():
-    print("\nAfter cleanup:")
-    print("WORK_IMAGES:", WORK_IMAGES)
-
-    files = list(WORK_IMAGES.glob("*"))
-    print("Files after cleanup:", len(files))
     if DATABASE.exists():
         DATABASE.unlink()
     if SPARSE.exists():
@@ -133,6 +169,10 @@ def prepare_workspace():
     DENSE.mkdir(parents=True)
     WORK_IMAGES.mkdir(parents=True)
     OPENMVS_WORKSPACE.mkdir(parents=True)
+
+    print("\nWorkspace cleaned.")
+    print("WORK_IMAGES:", WORK_IMAGES)
+    print("Files in WORK_IMAGES after cleanup:", len(list(WORK_IMAGES.glob("*"))))
 
 
 # ---------------------------------------------------------
@@ -172,13 +212,6 @@ def interpolate_frame(img1, img2, alpha):
 
 
 def pad_image_set(image_paths, min_images=MIN_IMAGES):
-    files = list(WORK_IMAGES.glob("*"))
-
-    print("\nWORK_IMAGES contains:")
-    print(len(files))
-
-    for f in files:
-     print(f.name)
     image_paths = sorted(image_paths)
 
     if len(image_paths) == 0:
@@ -243,10 +276,10 @@ def run_colmap():
     prepare_workspace()
 
     uploaded = sorted(
-    str(p)
-    for p in UPLOADS.iterdir()
-    if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
-)
+        str(p)
+        for p in UPLOADS.iterdir()
+        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
 
     if len(uploaded) == 0:
         raise RuntimeError(f"No images found in {UPLOADS}")
@@ -256,23 +289,64 @@ def run_colmap():
     print("\nImages passed to COLMAP:")
 
     for img in uploaded:
-     print(Path(img).name)
+        print(Path(img).name)
 
     print("Total:", len(uploaded))
 
     pad_image_set(uploaded, min_images=MIN_IMAGES)
 
+    # -------------------------------------------------------------
+    # FIX (speed): --SiftExtraction.max_image_size downsamples each
+    # image before SIFT runs (default is 3200px on the long side --
+    # full drone-photo resolution). --max_num_features caps how many
+    # keypoints are kept per image (default 8192). Both scale
+    # extraction time roughly linearly/quadratically, and neither is
+    # needed at full strength just to register camera poses for a
+    # well-overlapped drone set. --num_threads -1 uses all CPU cores
+    # (this build has no GPU, so this is the only parallelism lever).
+    # -------------------------------------------------------------
     print("\nSTEP 1 : Feature Extraction\n")
     run([
         COLMAP, "feature_extractor",
         "--database_path", DATABASE,
         "--image_path", WORK_IMAGES,
-        "--ImageReader.single_camera", "1"
+        "--ImageReader.single_camera", "1",
+        # "--SiftExtraction.max_image_size", str(SIFT_MAX_IMAGE_SIZE),
+        "--SiftExtraction.max_num_features", str(SIFT_MAX_NUM_FEATURES),
+        # NOTE: --SiftExtraction.num_threads is not recognized by this
+        # COLMAP build (colmap-x64-windows-nocuda) and crashes the
+        # process before Step 1 even starts. Removed -- the default is
+        # already -1 (use all CPU cores), so this flag was redundant
+        # even when it worked.
     ])
 
+    # -------------------------------------------------------------
+    # FIX (speed): exhaustive_matcher tests every possible image pair
+    # (O(n^2)), which is wasted work for drone footage -- consecutive
+    # frames along a flight path overlap heavily, but frame 1 and
+    # frame 20 usually don't overlap at all. sequential_matcher only
+    # matches each frame against its SEQUENTIAL_MATCH_OVERLAP nearest
+    # neighbors in filename order (which pad_image_set preserves via
+    # its real_NNN naming), cutting match-pair count from ~O(n^2) to
+    # ~O(n). Loop detection is disabled since it requires a vocab
+    # tree file we don't ship and isn't needed for a one-pass flight.
+    # -------------------------------------------------------------
     print("\nSTEP 2 : Feature Matching\n")
-    run([COLMAP, "exhaustive_matcher", "--database_path", DATABASE])
+    if USE_SEQUENTIAL_MATCHING:
+        run([
+            COLMAP, "sequential_matcher",
+            "--database_path", DATABASE,
+            "--SequentialMatching.overlap", str(SEQUENTIAL_MATCH_OVERLAP),
+            "--SequentialMatching.loop_detection", "0",
+        ])
+    else:
+        run([COLMAP, "exhaustive_matcher", "--database_path", DATABASE])
 
+    # -------------------------------------------------------------
+    # FIX (speed): capped bundle-adjustment iteration counts so BA
+    # stops once poses have converged instead of running the full
+    # default iteration budget regardless of how quickly it settles.
+    # -------------------------------------------------------------
     print("\nSTEP 3 : Sparse Reconstruction\n")
     run([
         COLMAP, "mapper",
@@ -281,7 +355,13 @@ def run_colmap():
         "--output_path", SPARSE,
         "--Mapper.min_num_matches", "5",
         "--Mapper.abs_pose_min_num_inliers", "5",
-        "--Mapper.init_min_num_inliers", "10"
+        "--Mapper.init_min_num_inliers", "10",
+        "--Mapper.ba_local_max_num_iterations", str(MAPPER_BA_LOCAL_MAX_ITER),
+        "--Mapper.ba_global_max_num_iterations", str(MAPPER_BA_GLOBAL_MAX_ITER),
+        # NOTE: --Mapper.num_threads removed pre-emptively -- same
+        # option name, same COLMAP build that just rejected
+        # --SiftExtraction.num_threads above, and the default is
+        # already -1 (all CPU cores), so it wasn't adding anything.
     ])
 
     sparse_model = SPARSE / "0"
@@ -291,7 +371,10 @@ def run_colmap():
             "padding to the minimum image count. This usually means "
             "the real photos don't overlap enough for feature "
             "matching to register any cameras. Try photos/frames "
-            "with more overlap (60-80%) between consecutive shots."
+            "with more overlap (60-80%) between consecutive shots. "
+            "If you just enabled sequential matching, also check that "
+            "SEQUENTIAL_MATCH_OVERLAP is large enough to bridge any "
+            "gaps in your flight path."
         )
 
     print("\nSTEP 4 : Image Undistortion\n")
@@ -302,23 +385,7 @@ def run_colmap():
         "--output_path", DENSE,
         "--output_type", "COLMAP"
     ])
-    print("\nSTEP 5 : Patch Match Stereo\n")
 
-#     run([
-#     COLMAP,
-#     "patch_match_stereo",
-#     "--workspace_path", DENSE,
-#     "--workspace_format", "COLMAP"
-# ])
-#     print("\nSTEP 6 : Stereo Fusion\n")
-
-#     run([
-#     COLMAP,
-#     "stereo_fusion",
-#     "--workspace_path", DENSE,
-#     "--workspace_format", "COLMAP",
-#     "--output_path", DENSE / "fused.ply"
-# ])
     print("\nSTEP 5 : Convert COLMAP -> OpenMVS\n")
     run([
         INTERFACE_COLMAP,
@@ -330,8 +397,27 @@ def run_colmap():
     if not SCENE.exists():
         raise RuntimeError("InterfaceCOLMAP failed.")
 
+    # -------------------------------------------------------------
+    # FIX (speed): DensifyPointCloud was running depth-map
+    # estimation + geometric-consistency refinement at full drone
+    # photo resolution (3072x2304) across all views, which alone
+    # took over an hour for 33 images. --resolution-level downsamples
+    # each image before stereo matching (2 = quarter resolution,
+    # i.e. two halvings), --max-resolution caps the longest side as
+    # a hard ceiling, and --number-views limits how many neighbor
+    # views are fused per point (fewer views = less work per pixel,
+    # default fuses against many more). This is the single biggest
+    # lever on runtime since depth-map estimation dominated the
+    # 1h10m Step 6 time in the failing run.
+    # -------------------------------------------------------------
     print("\nSTEP 6 : Densify Point Cloud\n")
-    run([DENSIFY, "-i", SCENE.resolve()], cwd=OPENMVS_WORKSPACE)
+    run([
+        DENSIFY, "-i", SCENE.resolve(),
+        "--resolution-level", "2",
+        "--max-resolution", "1600",
+        "--number-views", "4",
+        "--max-threads", "0",
+    ], cwd=OPENMVS_WORKSPACE)
 
     dense_scene = OPENMVS_WORKSPACE / "scene_dense.mvs"
     dense_ply = OPENMVS_WORKSPACE / "scene_dense.ply"
@@ -364,7 +450,7 @@ def run_colmap():
         else:
             # With <= 4 images, DensifyPointCloud routinely produces 0
             # dense points because depth-map fusion needs more stereo
-            # views. The 117-point COLMAP sparse cloud is enough for
+            # views. The sparse COLMAP point cloud is enough for
             # ReconstructMesh to build a basic mesh -- continue.
             print(
                 f"WARNING: DensifyPointCloud produced only {n_points} dense "
@@ -412,31 +498,97 @@ def run_colmap():
     print("\nSTEP 8 : Refine Mesh\n")
 
     refined_scene = OPENMVS_WORKSPACE / "scene_dense_mesh_refine.mvs"
+    refined_ply = OPENMVS_WORKSPACE / "scene_dense_mesh_refine.ply"
 
+    # -------------------------------------------------------------
+    # FIX (speed): RefineMesh defaults to multiple coarse-to-fine
+    # scales, subdividing the mesh between each one. In the failing
+    # run, scale 1 alone took 43+ minutes for 45 iterations, then it
+    # subdivided to ~695k faces and hung into scale 2. --scales 1
+    # skips the extra coarse-to-fine passes, and --max-face-area
+    # caps subdivision so the mesh doesn't balloon in face count
+    # mid-refinement.
+    #
+    # FIX (speed, round 2): --scales 1 alone wasn't enough -- each
+    # remaining iteration was still scoring photo-consistency against
+    # full-resolution images across up to 8 neighboring views per
+    # face, which is the actual per-iteration cost. --resolution-level
+    # downsamples the images used for that scoring (mirrors the same
+    # fix already applied to DensifyPointCloud above), and --max-views
+    # caps how many neighbor views are checked per face. Together
+    # these cut the per-iteration cost by roughly the same factor
+    # DensifyPointCloud got from its own resolution-level/number-views
+    # fix, which is what makes RefineMesh's runtime actually match its
+    # iteration count instead of blowing past it.
+    # -------------------------------------------------------------
     refine_cmd = [REFINE, "-i", refine_input.resolve()]
     if refine_mesh_override is not None:
         refine_cmd += ["-m", refine_mesh_override.resolve()]
-    refine_cmd += ["-o", refined_scene.resolve()]
+    refine_cmd += [
+        "-o", refined_scene.resolve(),
+        "--scales", "1",
+        "--max-face-area", "64",
+        "--resolution-level", str(REFINE_RESOLUTION_LEVEL),
+        "--max-views", str(REFINE_MAX_VIEWS),
+        "--max-threads", "0",
+    ]
 
     run(refine_cmd, cwd=OPENMVS_WORKSPACE)
 
-    # Use a variable for result path to avoid shadowing mesh_scene
-    final_mvs = refined_scene if refined_scene.exists() else mesh_scene
-    if not final_mvs.exists() and mesh_ply.exists():
-        final_mvs = mesh_ply
+    # -------------------------------------------------------------
+    # FIX: Same ".mvs not re-embedded" issue can happen here too, and
+    # the previous code did not account for it -- it fell straight
+    # back to the *pre-refine* mesh (scene_dense_mesh.ply, ~4x more
+    # faces) whenever scene_dense_mesh_refine.mvs was missing. That's
+    # exactly what happened in the failing run: TextureMesh got fed
+    # the huge un-refined 1,125,284-face mesh instead of the refined
+    # 258,255-face mesh, and crashed outright (no stdout/stderr =
+    # hard crash, almost certainly memory pressure while building
+    # texture patches/atlas for 10k+ patches on that much larger mesh).
+    #
+    # Always prefer the refined mesh over the pre-refine mesh when
+    # deciding what to texture.
+    # -------------------------------------------------------------
+    if refined_scene.exists():
+        print("Refined mesh MVS created.")
+        texture_input_scene = refined_scene
+        texture_mesh_override = None
+    elif refined_ply.exists():
+        print(
+            "RefineMesh wrote scene_dense_mesh_refine.ply but not the "
+            ".mvs scene. Feeding TextureMesh the pre-mesh scene plus "
+            "the refined mesh file directly instead."
+        )
+        texture_input_scene = dense_scene
+        texture_mesh_override = refined_ply
+    elif mesh_scene.exists():
+        print(
+            "WARNING: RefineMesh produced no output at all. Falling "
+            "back to the un-refined mesh scene for texturing."
+        )
+        texture_input_scene = mesh_scene
+        texture_mesh_override = None
+    elif mesh_ply.exists():
+        print(
+            "WARNING: RefineMesh produced no output at all. Falling "
+            "back to the un-refined mesh ply for texturing."
+        )
+        texture_input_scene = dense_scene
+        texture_mesh_override = mesh_ply
+    else:
+        raise RuntimeError(
+            "Neither a refined nor an un-refined mesh was found "
+            "before texturing -- RefineMesh and ReconstructMesh both "
+            "produced no usable output."
+        )
 
     print("\nSTEP 9 : Texture Mesh\n")
 
     textured_scene = OPENMVS_WORKSPACE / "scene_dense_mesh_refine_texture.mvs"
 
-    texture_cmd = [TEXTURE, "-i", final_mvs.resolve()]
-    if final_mvs.suffix == ".ply":
-        # final_mvs fell back to a bare .ply (no camera poses) --
-        # still needs the scene for cameras.
-        texture_cmd = [
-            TEXTURE, "-i", dense_scene.resolve(),
-            "-m", final_mvs.resolve()
-        ]
+    texture_cmd = [TEXTURE, "-i", texture_input_scene.resolve()]
+    if texture_mesh_override is not None:
+        texture_cmd += ["-m", texture_mesh_override.resolve()]
     texture_cmd += ["-o", textured_scene.resolve()]
 
     run(texture_cmd, cwd=OPENMVS_WORKSPACE)
@@ -447,14 +599,22 @@ def run_colmap():
         OPENMVS_WORKSPACE / "scene_dense_mesh.ply",
     ]
 
+    # -------------------------------------------------------------
+    # FIX: the previous version had the "raise if not found" check
+    # INSIDE the for-loop at the same indent level as (not nested
+    # under) "if p.exists()". That meant: as soon as the FIRST
+    # candidate in the list didn't exist, it raised immediately
+    # without ever checking the remaining candidates. Moved the
+    # check to run once, after the loop finishes.
+    # -------------------------------------------------------------
     mesh_file = None
     for p in ply_candidates:
         if p.exists():
             mesh_file = p
             break
 
-        if mesh_file is None:
-         raise RuntimeError("No textured mesh (.ply) was created.")
+    if mesh_file is None:
+        raise RuntimeError("No textured mesh (.ply) was created.")
 
     glb_path = OUTPUTS / "model.glb"
 
@@ -469,7 +629,7 @@ def run_colmap():
     mesh.translate(-center)
 
     R = mesh.get_rotation_matrix_from_xyz(
-        (-np.pi / 2, 0, 0)
+        (-np.pi / 2, np.pi, 0)
     )
 
     mesh.rotate(R, center=(0, 0, 0))

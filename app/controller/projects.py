@@ -2,8 +2,14 @@ import json
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.dependencies import get_current_user
+from app.models.project import Project
+from app.models.user import User
 
 router = APIRouter(
     prefix="/api/projects",
@@ -18,17 +24,29 @@ PROJECTS_DIR = Path("app/outputs/projects")
 # ============================================================================
 
 @router.get("/")
-def list_projects():
+def list_projects(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
-    List all generated projects with metadata.
+    List only the current user's generated projects.
     """
+
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
     projects = []
 
-    for project in sorted(PROJECTS_DIR.iterdir(), reverse=True):
+    project_records = (
+        db.query(Project)
+        .filter(Project.user_id == current_user.id)
+        .all()
+    )
 
-        if not project.is_dir():
+    for record in project_records:
+
+        project = PROJECTS_DIR / record.project_id
+
+        if not project.exists():
             continue
 
         metadata_file = project / "metadata.json"
@@ -77,14 +95,33 @@ def list_projects():
 # ============================================================================
 
 @router.get("/{project_id}")
-def get_project(project_id: str):
+def get_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    project_db = (
+        db.query(Project)
+        .filter(
+            Project.project_id == project_id,
+            Project.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not project_db:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
 
     project = PROJECTS_DIR / project_id
 
     if not project.exists():
         raise HTTPException(
             status_code=404,
-            detail="Project not found"
+            detail="Project not found",
         )
 
     metadata_file = project / "metadata.json"
@@ -106,14 +143,33 @@ def get_project(project_id: str):
 # ============================================================================
 
 @router.get("/{project_id}/report")
-def download_report(project_id: str):
+def download_report(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    project_db = (
+        db.query(Project)
+        .filter(
+            Project.project_id == project_id,
+            Project.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not project_db:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
 
     project = PROJECTS_DIR / project_id
 
     if not project.exists():
         raise HTTPException(
             status_code=404,
-            detail="Project not found"
+            detail="Project not found",
         )
 
     report = next(project.glob("*.pdf"), None)
@@ -121,7 +177,7 @@ def download_report(project_id: str):
     if report is None:
         raise HTTPException(
             status_code=404,
-            detail="Report not found"
+            detail="Report not found",
         )
 
     return FileResponse(
@@ -136,14 +192,33 @@ def download_report(project_id: str):
 # ============================================================================
 
 @router.get("/{project_id}/model")
-def download_model(project_id: str):
+def download_model(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    project_db = (
+        db.query(Project)
+        .filter(
+            Project.project_id == project_id,
+            Project.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not project_db:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
 
     project = PROJECTS_DIR / project_id
 
     if not project.exists():
         raise HTTPException(
             status_code=404,
-            detail="Project not found"
+            detail="Project not found",
         )
 
     model = project / "model.glb"
@@ -151,7 +226,7 @@ def download_model(project_id: str):
     if not model.exists():
         raise HTTPException(
             status_code=404,
-            detail="Model not found"
+            detail="Model not found",
         )
 
     return FileResponse(
@@ -166,17 +241,34 @@ def download_model(project_id: str):
 # ============================================================================
 
 @router.delete("/{project_id}")
-def delete_project(project_id: str):
+def delete_project(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    project_db = (
+        db.query(Project)
+        .filter(
+            Project.project_id == project_id,
+            Project.user_id == current_user.id,
+        )
+        .first()
+    )
+
+    if not project_db:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied",
+        )
 
     project = PROJECTS_DIR / project_id
 
-    if not project.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Project not found"
-        )
+    if project.exists():
+        shutil.rmtree(project)
 
-    shutil.rmtree(project)
+    db.delete(project_db)
+    db.commit()
 
     return {
         "success": True,

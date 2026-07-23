@@ -2,14 +2,14 @@
 import bpy
 from pathlib import Path
 
-print("="*60)
+print("=" * 60)
 print("BLENDER STARTED")
 print("Version:", bpy.app.version_string)
 
 # Clean scene
 bpy.ops.wm.read_factory_settings(use_empty=True)
 
-mesh = Path(r"C:\Users\Manikantha.N\Desktop\dronevision-backend\app\outputs\model.glb")
+mesh = Path(r"C:\Users\Manikantha.N\Desktop\dronevision-backend\app\outputs\openmvs\scene_dense_mesh_refine_texture.ply")
 
 print("Mesh:", mesh)
 
@@ -33,7 +33,7 @@ print("Mesh imported successfully.")
 
 bpy.ops.object.select_all(action="SELECT")
 
-output = r"app\outputs\model.glb"
+output = r"C:\Users\Manikantha.N\Desktop\dronevision-backend\app\outputs\projects\ff95d255661e497d9f3e8fdbf6a1d80a\model.glb"
 
 print("Exporting to:", output)
 
@@ -44,4 +44,4 @@ bpy.ops.export_scene.gltf(
 )
 
 print("GLB exported successfully.")
-print("="*60)
+print("=" * 60)
