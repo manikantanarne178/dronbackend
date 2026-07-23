@@ -5,18 +5,24 @@ from pathlib import Path
 # Paths
 # ==============================
 
-OUTPUT = Path("app/outputs")
-OUTPUT.mkdir(parents=True, exist_ok=True)
-
 SCRIPTS = Path("app/scripts")
 SCRIPTS.mkdir(parents=True, exist_ok=True)
 
-BLENDER = Path(r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe")
+BLENDER = Path(
+    r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
+)
 
 
-def convert_to_glb(mesh_path):
+def convert_to_glb(mesh_path, project_dir):
     """
     Convert a mesh (.ply/.obj) into GLB using Blender.
+
+    Args:
+        mesh_path: Input mesh (.ply/.obj)
+        project_dir: Folder where model.glb should be saved
+
+    Returns:
+        Full path to generated GLB.
     """
 
     mesh = Path(mesh_path)
@@ -27,7 +33,11 @@ def convert_to_glb(mesh_path):
     if not BLENDER.exists():
         raise FileNotFoundError(f"Blender not found:\n{BLENDER}")
 
-    glb = OUTPUT / "model.glb"
+    project_dir = Path(project_dir)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    glb = project_dir / "model.glb"
+
     script = SCRIPTS / "blender_convert.py"
 
     script.write_text(
@@ -35,7 +45,7 @@ f'''
 import bpy
 from pathlib import Path
 
-print("="*60)
+print("=" * 60)
 print("BLENDER STARTED")
 print("Version:", bpy.app.version_string)
 
@@ -77,7 +87,7 @@ bpy.ops.export_scene.gltf(
 )
 
 print("GLB exported successfully.")
-print("="*60)
+print("=" * 60)
 '''
     )
 
@@ -108,10 +118,6 @@ print("="*60)
     print("RETURN CODE:", result.returncode)
     print("=" * 80)
 
-    # -------------------------------------------------------
-    # Success if GLB exists
-    # -------------------------------------------------------
-
     if glb.exists():
         print("\n==========================================")
         print("GLB created successfully")
@@ -119,10 +125,6 @@ print("="*60)
         print("==========================================\n")
 
         return str(glb)
-
-    # -------------------------------------------------------
-    # Failure only if GLB was NOT created
-    # -------------------------------------------------------
 
     raise RuntimeError(
         f"""

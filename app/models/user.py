@@ -1,5 +1,7 @@
-from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
+
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy.orm import relationship
 
 from app.models.base import Base
 
@@ -30,4 +32,11 @@ class User(Base):
     created_at = Column(
         DateTime,
         default=datetime.utcnow
+    )
+
+    # Relationship with Project table
+    projects = relationship(
+        "Project",
+        back_populates="user",
+        cascade="all, delete"
     )

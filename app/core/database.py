@@ -4,6 +4,10 @@ from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 from app.models.base import Base
 
+# Import models so SQLAlchemy registers them
+from app.models.user import User
+from app.models.project import Project
+
 engine = create_engine(
     settings.DATABASE_URL,
     echo=False,
