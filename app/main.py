@@ -12,7 +12,7 @@ from app.route.analytics import router as analytics_router
 from app.controller.auth import router as auth_router
 from app.controller.projects import router as projects_router
 from app.controller.report import router as report_router
-
+from app.route.gps import router as gps_router
 app = FastAPI(
     title="DroneVision API",
     version="1.0.0",
@@ -45,7 +45,7 @@ app.include_router(analytics_router)
 app.include_router(report_router)
 app.include_router(projects_router)
 app.include_router(auth_router)
-
+app.include_router(gps_router)
 
 # ============================
 # Swagger File Upload Fix

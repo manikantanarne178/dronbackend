@@ -11,6 +11,9 @@ import numpy as np
 import uuid
 import json
 from app.reconstruction.converter import convert_to_glb
+from app.services.gps_service import get_all_gps
+from math import radians, sin, cos, sqrt, atan2
+from datetime import datetime
 # ---------------------------------------------------------
 # PATHS
 # ---------------------------------------------------------
@@ -152,7 +155,82 @@ def run(cmd, cwd=None):
             f"--- STDERR ---\n{result.stderr}\n"
         )
 
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
 
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1))
+        * cos(radians(lat2))
+        * sin(dlon / 2) ** 2
+    )
+
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def calculate_mission(images):
+    if not images:
+        return {
+            "distance": 0,
+            "avg_altitude": 0,
+            "flight_time": None,
+            "camera": None,
+        }
+
+    distance = 0
+
+    for i in range(1, len(images)):
+        p1 = images[i - 1]
+        p2 = images[i]
+
+        distance += haversine(
+            p1["latitude"],
+            p1["longitude"],
+            p2["latitude"],
+            p2["longitude"],
+        )
+
+    altitudes = [
+        img["altitude"]
+        for img in images
+        if img["altitude"] is not None
+    ]
+
+    avg_altitude = (
+        sum(altitudes) / len(altitudes)
+        if altitudes
+        else 0
+    )
+
+    camera = images[0]["camera"]
+
+    flight_time = None
+
+    try:
+        start = datetime.strptime(
+            images[0]["captured"],
+            "%Y:%m:%d %H:%M:%S",
+        )
+
+        end = datetime.strptime(
+            images[-1]["captured"],
+            "%Y:%m:%d %H:%M:%S",
+        )
+
+        flight_time = str(end - start)
+
+    except Exception:
+        pass
+
+    return {
+        "distance": round(distance, 2),
+        "avg_altitude": round(avg_altitude, 2),
+        "flight_time": flight_time,
+        "camera": camera,
+    }
 def count_ply_elements(ply_path, element_name="vertex"):
     """Read the vertex/point count out of a PLY header without a
     full PLY parsing library."""
@@ -335,13 +413,13 @@ def run_colmap():
     # -------------------------------------------------------------
     print("\nSTEP 1 : Feature Extraction\n")
     run([
-    COLMAP, "feature_extractor",
-    "--database_path", DATABASE,
-    "--image_path", WORK_IMAGES,
-    "--ImageReader.single_camera", "1",
-    "--FeatureExtraction.max_image_size", str(SIFT_MAX_IMAGE_SIZE),
-    "--SiftExtraction.max_num_features", str(SIFT_MAX_NUM_FEATURES),
-])
+        COLMAP, "feature_extractor",
+        "--database_path", DATABASE,
+        "--image_path", WORK_IMAGES,
+        "--ImageReader.single_camera", "1",
+        "--FeatureExtraction.max_image_size", str(SIFT_MAX_IMAGE_SIZE),
+        "--SiftExtraction.max_num_features", str(SIFT_MAX_NUM_FEATURES),
+    ])
 
     # -------------------------------------------------------------
     # FIX (speed): exhaustive_matcher tests every possible image pair
@@ -665,48 +743,65 @@ def run_colmap():
     glb_path = convert_to_glb(mesh_file, project_dir)
     print("GLB saved at:", glb_path)
 
-# Convert the generated mesh into GLB
+    # Convert the generated mesh into GLB
     # glb_path = convert_to_glb(mesh_file, project_dir)
 
     mesh = o3d.io.read_triangle_mesh(str(mesh_file))
 
     if mesh.is_empty():
-       raise RuntimeError("Generated mesh is empty.")
+        raise RuntimeError("Generated mesh is empty.")
 
     bbox = mesh.get_axis_aligned_bounding_box()
     size = bbox.get_extent()
 
     statistics = {
-    "vertices": int(len(mesh.vertices)),
-    "triangles": int(len(mesh.triangles)),
-    "width": float(size[0]),
-    "height": float(size[1]),
-    "depth": float(size[2]),
-}
+        "vertices": int(len(mesh.vertices)),
+        "triangles": int(len(mesh.triangles)),
+        "width": float(size[0]),
+        "height": float(size[1]),
+        "depth": float(size[2]),
+    }
+
+    gps_images = get_all_gps()
+
+    mission = calculate_mission(gps_images)
 
     metadata = {
-    "project_id": project_id,
-    "images_uploaded": n_real,
-    "vertices": statistics["vertices"],
-    "triangles": statistics["triangles"],
-    "dimensions": {
-        "width": statistics["width"],
-        "length": statistics["depth"],
-        "height": statistics["height"],
-    },
-    "surface_area": 0,
-    "volume": 0,
-}
+        "project_id": project_id,
+
+        "images_uploaded": n_real,
+
+        "vertices": statistics["vertices"],
+        "triangles": statistics["triangles"],
+
+        "dimensions": {
+            "width": statistics["width"],
+            "length": statistics["depth"],
+            "height": statistics["height"],
+        },
+
+        "surface_area": 0,
+        "volume": 0,
+
+        "distance": mission["distance"],
+        "avg_altitude": mission["avg_altitude"],
+        "flight_time": mission["flight_time"],
+        "camera": mission["camera"],
+
+        "images": gps_images,
+    }
 
     with open(project_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=4)
 
     return {
-    "project_id": project_id,
-    "model_path": glb_path,
-    "status": "completed",
-    "statistics": statistics,
-}
+        "project_id": project_id,
+        "model_path": glb_path,
+        "status": "completed",
+        "statistics": statistics,
+    }
+
+
 def run_pipeline():
     """
     Entry point called by the FastAPI route.
