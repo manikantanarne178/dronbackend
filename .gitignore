@@ -29,3 +29,12 @@ Thumbs.db
 
 # Uploads
 uploads/
+
+# Generated outputs
+app/outputs/
+*.db
+*.dmap
+*.mvs
+*.ply
+*.glb
+*.bin
