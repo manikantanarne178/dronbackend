@@ -77,8 +77,19 @@ class PDFReportGenerator:
         with open(self.metadata_file, "r", encoding="utf-8") as f:
             self.metadata = json.load(f)
 
-        self._build_styles()
+# Load rules.json
+        self.rules_file = self.project_dir / "rules.json"
 
+        if self.rules_file.exists():
+           with open(self.rules_file, "r", encoding="utf-8") as f:
+               self.rule_data = json.load(f)
+        else:
+           self.rule_data = {
+        "overall_status": "UNKNOWN",
+        "rules": []
+    }
+
+        self._build_styles()
     # ----------------------------------------------------------
     # STYLES
     # ----------------------------------------------------------
@@ -480,4 +491,61 @@ if __name__ == "__main__":
     import sys
     project_dir = sys.argv[1] if len(sys.argv) > 1 else "."
     out = PDFReportGenerator(project_dir).generate()
+def _compliance_table(self):
+
+    rows = [
+        [
+            Paragraph("<b>Rule</b>", self.info_value_style),
+            Paragraph("<b>Status</b>", self.info_value_style),
+            Paragraph("<b>Actual</b>", self.info_value_style),
+            Paragraph("<b>Allowed</b>", self.info_value_style),
+        ]
+    ]
+
+    for rule in self.rule_data.get("rules", []):
+
+        status = rule.get("status", "-")
+
+        if status.upper() == "PASS":
+            color = colors.green
+        elif status.upper() == "FAIL":
+            color = colors.red
+        else:
+            color = colors.orange
+
+        rows.append([
+            Paragraph(rule.get("rule", "-"), self.info_label_style),
+            Paragraph(
+                f'<font color="{color.hexval()}"><b>{status}</b></font>',
+                self.info_label_style,
+            ),
+            Paragraph(str(rule.get("actual", "-")), self.info_label_style),
+            Paragraph(str(rule.get("allowed", "-")), self.info_label_style),
+        ])
+
+    table = Table(
+        rows,
+        colWidths=[2.2*inch, 1.0*inch, 1.2*inch, 1.2*inch]
+    )
+
+    table.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E2E8F0")),
+        ("BOTTOMPADDING", (0,0), (-1,0), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 5),
+        ("BOTTOMPADDING", (0,1), (-1,-1), 5),
+        ("ALIGN", (1,1), (-1,-1), "CENTER"),
+    ]))
+
+    overall = Paragraph(
+        f"<b>Overall Compliance :</b> {self.rule_data.get('overall_status','UNKNOWN')}",
+        self.info_value_style,
+    )
+
+    return [
+        self.section_label("Compliance Report"),
+        table,
+        Spacer(1, 8),
+        overall,
+    ]
     print("Generated:", out)

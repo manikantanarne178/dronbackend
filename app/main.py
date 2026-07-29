@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
 from app.core.database import create_tables
-
+from app.route.drawing import router as drawing_router
 from app.route.home import router as home_router
 from app.route.upload import router as upload_router
 from app.route import reconstruction
@@ -13,6 +13,9 @@ from app.controller.auth import router as auth_router
 from app.controller.projects import router as projects_router
 from app.controller.report import router as report_router
 from app.route.gps import router as gps_router
+from app.core.database import SessionLocal
+from app.core.seed_rules import seed_rules
+from app.route import report
 app = FastAPI(
     title="DroneVision API",
     version="1.0.0",
@@ -21,7 +24,9 @@ app = FastAPI(
 
 # Create database tables
 create_tables()
-
+db = SessionLocal()
+seed_rules(db)
+db.close()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -37,7 +42,7 @@ app.add_middleware(
 # ============================
 # Routers
 # ============================
-
+app.include_router(drawing_router)
 app.include_router(home_router)
 app.include_router(upload_router)
 app.include_router(reconstruction.router)
@@ -46,7 +51,7 @@ app.include_router(report_router)
 app.include_router(projects_router)
 app.include_router(auth_router)
 app.include_router(gps_router)
-
+app.include_router(report.router)
 # ============================
 # Swagger File Upload Fix
 # ============================
