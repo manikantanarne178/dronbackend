@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -15,6 +15,14 @@ class ParsedDrawing:
 
     blocks: List[Dict[str, Any]] = field(default_factory=list)
 
+    inserts: List[Dict[str, Any]] = field(default_factory=list)
+
+    attributes: List[Dict[str, Any]] = field(default_factory=list)
+
+    hatches: List[Dict[str, Any]] = field(default_factory=list)
+
+    leaders: List[Dict[str, Any]] = field(default_factory=list)
+
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self):
@@ -25,6 +33,10 @@ class ParsedDrawing:
             "texts": self.texts,
             "dimensions": self.dimensions,
             "blocks": self.blocks,
+            "inserts": self.inserts,
+            "attributes": self.attributes,
+            "hatches": self.hatches,
+            "leaders": self.leaders,
             "metadata": self.metadata,
         }
 
@@ -131,4 +143,39 @@ class EntityFactory:
             "type": "HATCH",
             "layer": layer,
             "boundary": boundary
+        }
+
+    @staticmethod
+    def ellipse(layer, center, major_axis, ratio, start_param=0.0, end_param=6.283185307):
+        return {
+            "type": "ELLIPSE",
+            "layer": layer,
+            "center": list(center),
+            "major_axis": list(major_axis),
+            "ratio": ratio,
+            "start_param": start_param,
+            "end_param": end_param
+        }
+
+    @staticmethod
+    def leader(layer, vertices, annotation=None):
+        return {
+            "type": "LEADER",
+            "layer": layer,
+            "vertices": [list(v) for v in vertices],
+            "annotation": annotation
+        }
+
+    @staticmethod
+    def insert_entity(layer, name, insert, attributes=None,
+                      rotation=0.0, x_scale=1.0, y_scale=1.0):
+        return {
+            "type": "INSERT",
+            "layer": layer,
+            "name": name,
+            "insert": list(insert),
+            "attributes": attributes or [],
+            "rotation": rotation,
+            "x_scale": x_scale,
+            "y_scale": y_scale
         }

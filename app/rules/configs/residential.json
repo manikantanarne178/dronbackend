@@ -1,0 +1,62 @@
+{
+  "zone": "Residential",
+  "version": "1.0",
+  "rules": {
+    "ground_coverage": {
+      "name": "Ground Coverage Percentage",
+      "max": 65.0,
+      "reference_code": "DCR-RES-01",
+      "severity": "HIGH",
+      "suggestion": "Reduce building footprint area relative to plot area."
+    },
+    "fsi": {
+      "name": "Floor Space Index (FSI)",
+      "max": 2.5,
+      "reference_code": "DCR-RES-02",
+      "severity": "CRITICAL",
+      "suggestion": "Reduce total built-up area across floors."
+    },
+    "building_height": {
+      "name": "Maximum Building Height",
+      "max": 18.0,
+      "reference_code": "DCR-RES-03",
+      "severity": "CRITICAL",
+      "suggestion": "Reduce number of floors or floor-to-floor height."
+    },
+    "front_setback": {
+      "name": "Front Setback Distance",
+      "min": 3.0,
+      "reference_code": "DCR-RES-04",
+      "severity": "HIGH",
+      "suggestion": "Increase clearance between building front and plot boundary."
+    },
+    "rear_setback": {
+      "name": "Rear Setback Distance",
+      "min": 2.0,
+      "reference_code": "DCR-RES-05",
+      "severity": "MEDIUM",
+      "suggestion": "Increase clearance at rear of plot."
+    },
+    "side_setback": {
+      "name": "Side Setback Distance",
+      "min": 1.5,
+      "reference_code": "DCR-RES-06",
+      "severity": "MEDIUM",
+      "suggestion": "Increase side clearance to plot boundary."
+    },
+    "rain_water_harvesting": {
+      "name": "Rain Water Harvesting Pit",
+      "min_count": 1,
+      "reference_code": "DCR-RES-07",
+      "severity": "MEDIUM",
+      "suggestion": "Provide at least one Rain Water Harvesting pit on site."
+    },
+    "solar_panels": {
+      "name": "Rooftop Solar PV Installation",
+      "min_area": 10.0,
+      "reference_code": "DCR-RES-08",
+      "severity": "LOW",
+      "suggestion": "Install rooftop solar panels covering minimum required area."
+    }
+  }
+}
