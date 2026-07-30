@@ -1,0 +1,41 @@
+{
+  "zone": "Commercial",
+  "version": "1.0",
+  "rules": {
+    "ground_coverage": {
+      "name": "Ground Coverage Percentage",
+      "max": 50.0,
+      "reference_code": "DCR-COM-01",
+      "severity": "HIGH",
+      "suggestion": "Reduce ground coverage for commercial zone."
+    },
+    "fsi": {
+      "name": "Floor Space Index (FSI)",
+      "max": 3.0,
+      "reference_code": "DCR-COM-02",
+      "severity": "CRITICAL",
+      "suggestion": "Ensure total commercial built-up area does not exceed 3.0 FSI."
+    },
+    "building_height": {
+      "name": "Maximum Building Height",
+      "max": 30.0,
+      "reference_code": "DCR-COM-03",
+      "severity": "CRITICAL",
+      "suggestion": "Maintain height within commercial limit or upgrade to High-Rise classification."
+    },
+    "front_setback": {
+      "name": "Front Setback Distance",
+      "min": 6.0,
+      "reference_code": "DCR-COM-04",
+      "severity": "HIGH",
+      "suggestion": "Provide minimum 6m front margin for commercial vehicular access."
+    },
+    "stp": {
+      "name": "Sewage Treatment Plant (STP)",
+      "min_count": 1,
+      "reference_code": "DCR-COM-05",
+      "severity": "HIGH",
+      "suggestion": "Install dedicated Sewage Treatment Plant for commercial effluent."
+    }
+  }
+}

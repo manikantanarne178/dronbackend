@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: autodcr_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./autodcr.db
+      - ENVIRONMENT=production
+      - SECRET_KEY=change_this_to_a_secure_secret_key_in_production
+    volumes:
+      - ./uploads:/app/uploads
+      - ./app/outputs:/app/app/outputs
+
+  redis:
+    image: redis:7-alpine
+    container_name: autodcr_redis
+    restart: always
+    ports:
+      - "6379:6379"

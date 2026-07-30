@@ -43,6 +43,10 @@ app.add_middleware(
 # Routers
 # ============================
 app.include_router(drawing_router)
+# AutoDCR Engine routes
+from app.route.autodcr.router import router as autodcr_router
+
+app.include_router(autodcr_router)
 app.include_router(home_router)
 app.include_router(upload_router)
 app.include_router(reconstruction.router)
