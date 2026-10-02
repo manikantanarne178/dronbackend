@@ -8,6 +8,15 @@ from app.models.base import Base
 from app.models.user import User
 from app.models.project import Project
 from app.models.rule_config import RuleConfig
+from app.models.autodcr_models import (
+    AutoDCRProject,
+    AutoDCRDrawing,
+    AutoDCRAnalysis,
+    RuleValidationResult,
+    ComplianceReportModel,
+    AuditLog,
+)
+
 engine = create_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,      # Enable SQL logs only in debug mode
