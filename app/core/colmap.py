@@ -1,8 +1,13 @@
 import os
 import shutil
 import subprocess
+import time
+import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
+logger = logging.getLogger("reconstruction.colmap")
+
 
 def resolve_colmap_executable() -> Optional[str]:
     """
@@ -10,8 +15,8 @@ def resolve_colmap_executable() -> Optional[str]:
     Checks:
     1. COLMAP_PATH environment variable
     2. System PATH (shutil.which)
-    3. Common Linux install locations
-    4. Common Windows install locations
+    3. Common Linux install locations (/usr/bin/colmap, /usr/local/bin/colmap, /opt/colmap/bin/colmap, /snap/bin/colmap)
+    4. Common Windows install locations (only if os.name == 'nt')
     """
     # 1. Environment variable
     env_path = os.getenv("COLMAP_PATH")
@@ -24,7 +29,7 @@ def resolve_colmap_executable() -> Optional[str]:
             return which_env
 
     # 2. System PATH
-    which_colmap = shutil.which("colmap") or shutil.which("colmap.exe")
+    which_colmap = shutil.which("colmap") or (shutil.which("colmap.exe") if os.name == "nt" else None)
     if which_colmap:
         return which_colmap
 
@@ -65,7 +70,7 @@ def resolve_openmvs_bin() -> Optional[Path]:
         if p.is_dir():
             return p
 
-    which_interface = shutil.which("InterfaceCOLMAP") or shutil.which("InterfaceCOLMAP.exe")
+    which_interface = shutil.which("InterfaceCOLMAP") or (shutil.which("InterfaceCOLMAP.exe") if os.name == "nt" else None)
     if which_interface:
         return Path(which_interface).parent
 
@@ -90,29 +95,118 @@ def resolve_openmvs_bin() -> Optional[Path]:
     return None
 
 
+def get_colmap_version(colmap_exec: Optional[str] = None) -> str:
+    """
+    Queries COLMAP version safely with a 5s timeout.
+    """
+    if not colmap_exec:
+        colmap_exec = resolve_colmap_executable()
+
+    if not colmap_exec:
+        return "Unavailable"
+
+    try:
+        res = subprocess.run(
+            [colmap_exec, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            return res.stdout.strip().splitlines()[0]
+        # Fallback to -h
+        res_h = subprocess.run(
+            [colmap_exec, "-h"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = (res_h.stdout or res_h.stderr or "").splitlines()
+        if lines:
+            return lines[0].strip()
+    except Exception as e:
+        return f"Detection error: {e}"
+
+    return "COLMAP (version unknown)"
+
+
 def get_colmap_diagnostics() -> Dict[str, Any]:
+    """
+    Provides real-time photogrammetry engine diagnostic metrics.
+    """
     colmap_exec = resolve_colmap_executable()
     openmvs_dir = resolve_openmvs_bin()
-    version_str = "Unavailable"
-
-    if colmap_exec:
-        try:
-            res = subprocess.run(
-                [colmap_exec, "-h"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            lines = (res.stdout or res.stderr or "").splitlines()
-            if lines:
-                version_str = lines[0].strip()
-        except Exception as e:
-            version_str = f"Error: {e}"
+    version_str = get_colmap_version(colmap_exec)
 
     return {
         "colmap_available": colmap_exec is not None,
-        "colmap_executable": Path(colmap_exec).name if colmap_exec else None,
+        "colmap_executable": colmap_exec,
         "colmap_version": version_str,
         "openmvs_available": openmvs_dir is not None,
+        "openmvs_dir": str(openmvs_dir) if openmvs_dir else None,
         "os": os.name,
     }
+
+
+def execute_colmap_command(cmd: List[str], cwd: Optional[str] = None, timeout: int = 60) -> subprocess.CompletedProcess:
+    """
+    Executes a photogrammetry subprocess command with comprehensive structured logging.
+    Logs:
+      - COLMAP_COMMAND_START
+      - COLMAP_COMMAND_EXIT
+      - COLMAP_STDOUT
+      - COLMAP_STDERR
+    """
+    colmap_exec = resolve_colmap_executable()
+    openmvs_bin = resolve_openmvs_bin()
+
+    env = os.environ.copy()
+    extra_paths = []
+    if openmvs_bin:
+        extra_paths.append(str(openmvs_bin))
+    if colmap_exec:
+        extra_paths.append(str(Path(colmap_exec).parent))
+
+    if extra_paths:
+        env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+
+    cmd_str = " ".join(map(str, cmd))
+    print(f"[COLMAP_COMMAND_START] {cmd_str}")
+    logger.info(f"COLMAP_COMMAND_START: {cmd_str}")
+    start_t = time.time()
+
+    try:
+        result = subprocess.run(
+            list(map(str, cmd)),
+            env=env,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        duration = round(time.time() - start_t, 2)
+        print(f"[COLMAP_COMMAND_EXIT] Code={result.returncode} Duration={duration}s")
+        if result.stdout.strip():
+            print(f"[COLMAP_STDOUT] {result.stdout.strip()}")
+        if result.stderr.strip():
+            print(f"[COLMAP_STDERR] {result.stderr.strip()}")
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"COLMAP command failed with exit code {result.returncode}.\n"
+                f"Command: {cmd_str}\n"
+                f"STDOUT: {result.stdout}\n"
+                f"STDERR: {result.stderr}"
+            )
+        return result
+
+    except subprocess.TimeoutExpired as e:
+        duration = round(time.time() - start_t, 2)
+        print(f"[COLMAP_COMMAND_EXIT] TIMEOUT ({timeout}s) Duration={duration}s")
+        print(f"[COLMAP_STDERR] Process timed out after {timeout} seconds")
+        raise RuntimeError(f"Command timed out after {timeout}s: {cmd_str}") from e
+    except Exception as e:
+        duration = round(time.time() - start_t, 2)
+        print(f"[COLMAP_COMMAND_EXIT] EXCEPTION: {e} Duration={duration}s")
+        raise
+
