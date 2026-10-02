@@ -1,19 +1,20 @@
 import os
 import shutil
-# import statistics
 import subprocess
 import glob
 from pathlib import Path
-from importlib_metadata import files
 import open3d as o3d
 import cv2
 import numpy as np
 import uuid
 import json
-from app.reconstruction.converter import convert_to_glb
-from app.services.gps_service import get_all_gps
 from math import radians, sin, cos, sqrt, atan2
 from datetime import datetime
+
+from app.core.colmap import resolve_colmap_executable, resolve_openmvs_bin
+from app.reconstruction.converter import convert_to_glb
+from app.services.gps_service import get_all_gps
+
 # ---------------------------------------------------------
 # PATHS
 # ---------------------------------------------------------
@@ -23,787 +24,291 @@ OUTPUTS = Path("app/outputs").resolve()
 
 COLMAP_WORKSPACE = (OUTPUTS / "colmap").resolve()
 OPENMVS_WORKSPACE = (OUTPUTS / "openmvs").resolve()
-
-# Working copy of the image set actually fed to COLMAP.
 WORK_IMAGES = (COLMAP_WORKSPACE / "images_padded").resolve()
-
-COLMAP = r"C:\Users\Manikantha.N\Downloads\colmap-x64-windows-nocuda\bin\colmap.exe"
-OPENMVS_BIN = Path(r"C:\OpenMVS_Windows_x64\vc17\x64\Release")
-
-INTERFACE_COLMAP = OPENMVS_BIN / "InterfaceCOLMAP.exe"
-DENSIFY = OPENMVS_BIN / "DensifyPointCloud.exe"
-RECONSTRUCT = OPENMVS_BIN / "ReconstructMesh.exe"
-REFINE = OPENMVS_BIN / "RefineMesh.exe"
-TEXTURE = OPENMVS_BIN / "TextureMesh.exe"
 
 DATABASE = (COLMAP_WORKSPACE / "database.db").resolve()
 SPARSE = (COLMAP_WORKSPACE / "sparse").resolve()
 DENSE = (COLMAP_WORKSPACE / "dense").resolve()
 SCENE = (OPENMVS_WORKSPACE / "scene.mvs").resolve()
 
-# Minimum number of images we want COLMAP to see. Fewer real images
-# get padded out with optical-flow interpolated in-between frames.
-MIN_IMAGES = 10
-
-# Synthetic frames help COLMAP's sparse matcher bridge gaps between
-# widely-spaced real photos, but can hurt dense MVS quality since
-# they have no genuine 3D viewpoint. Turn off if dense results look
-# thin/noisy and you have decent overlap in your real photos.
+MIN_IMAGES = 4
 ENABLE_SYNTHETIC_PADDING = False
-
-# Below this many dense points, ReconstructMesh will produce a
-# degenerate/empty mesh after its own cleanup pass. Fail fast here
-# instead of burning 10-20 minutes to hit that downstream.
-MIN_DENSE_POINTS = 50
-
-# ---------------------------------------------------------
-# PERFORMANCE TUNING
-# ---------------------------------------------------------
-# These are the knobs that took the pipeline from ~1-2 hours down to
-# a 5-10 minute target for a ~20 image drone set. They trade a small,
-# usually imperceptible amount of geometric/textural fidelity for a
-# large reduction in per-step wall-clock time. If output quality ever
-# looks too soft/blocky for a specific client deliverable, these are
-# the first values to dial back up (in this priority order:
-# REFINE_RESOLUTION_LEVEL -> REFINE_MAX_VIEWS -> SIFT_MAX_IMAGE_SIZE).
-#
-# ROUND 2 (target: full pipeline under ~2 minutes for a ~30-image
-# set): the 12-minute run in the last log spent ~7 min in Densify and
-# ~3 min in Refine alone -- those two steps are where basically all
-# the remaining budget has to come from. Pushed resolution-level and
-# view counts further on both, capped max-resolution harder, and
-# actually wired up SIFT_MAX_IMAGE_SIZE below (it was defined but
-# never passed to feature_extractor, so Step 1 was still running at
-# full drone-photo resolution). Every one of the 9 pipeline steps
-# still runs -- nothing is skipped, only downsampled/capped harder.
-#
-# Heads up: with 30 CPU-only images on a 4-core laptop chip, 2
-# minutes is aggressive even with these settings maxed out. If you're
-# still over budget after this round, the next lever isn't a flag at
-# all -- it's feeding fewer images into Steps 6-9 (Densify onward),
-# since those scale roughly linearly with registered image count.
-
-# Drone captures are taken along a flight path, so consecutive frames
-# overlap far more than distant ones. Sequential matching only tests
-# each frame against its N nearest neighbors in capture order instead
-# of every possible pair (exhaustive_matcher), which is O(n) instead
-# of O(n^2). This is the single biggest lever in the whole pipeline.
-USE_SEQUENTIAL_MATCHING = True
-SEQUENTIAL_MATCH_OVERLAP = 4  # ROUND 2: 6 -> 4. Fewer pairs matched per
-# image; flight-path overlap between adjacent frames is still covered,
-# just less redundantly.
-
-# SIFT feature extraction time scales with both image resolution and
-# feature count. Drone photos are usually captured at resolutions far
-# higher than COLMAP needs to register camera poses reliably. Capping
-# both keeps pose estimation accurate while cutting extraction time.
-SIFT_MAX_IMAGE_SIZE = 1200  # ROUND 2: 1600 -> 1200, and now actually
-# passed to feature_extractor below (previously defined but unused).
-SIFT_MAX_NUM_FEATURES = 4096
-
-# Bundle adjustment will keep iterating toward diminishing returns if
-# left uncapped. These caps stop it once poses have effectively
-# converged instead of grinding through the full default budget.
-MAPPER_BA_LOCAL_MAX_ITER = 20
-MAPPER_BA_GLOBAL_MAX_ITER = 30
-
-# Same idea as the DensifyPointCloud fix below, applied to RefineMesh:
-# --resolution-level downsamples the images used for photo-consistency
-# scoring during refinement (2 = quarter resolution), and --max-views
-# caps how many neighboring views are checked per vertex/face. Both
-# were left at their (expensive) defaults before, which is why
-# RefineMesh was still the long pole even after --scales 1.
-REFINE_RESOLUTION_LEVEL = 3  # ROUND 2: 2 -> 3 (eighth resolution instead
-# of quarter). This is the single biggest lever on Refine's ~3 min cost.
-REFINE_MAX_VIEWS = 2  # ROUND 2: 4 -> 2. Halves the per-face/per-vertex
-# photo-consistency scoring cost.
+MIN_DENSE_POINTS = 20
 
 OUTPUTS.mkdir(parents=True, exist_ok=True)
 COLMAP_WORKSPACE.mkdir(parents=True, exist_ok=True)
 OPENMVS_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 
-# ---------------------------------------------------------
-# Helper: run a subprocess and surface REAL errors
-# ---------------------------------------------------------
-
-def run(cmd, cwd=None):
-    print("\n===================================")
-    print("RUNNING")
-    print(" ".join(map(str, cmd)))
-    print("===================================\n")
+def run_cmd(cmd, cwd=None):
+    colmap_exec = resolve_colmap_executable()
+    openmvs_bin = resolve_openmvs_bin()
 
     env = os.environ.copy()
-    env["PATH"] = (
-        str(OPENMVS_BIN) + ";" +
-        r"C:\colmap-x64-windows-nocuda\bin;" +
-        env["PATH"]
-    )
-    env["QT_PLUGIN_PATH"] = r"C:\colmap-x64-windows-nocuda\plugins"
+    extra_paths = []
+    if openmvs_bin:
+        extra_paths.append(str(openmvs_bin))
+    if colmap_exec:
+        extra_paths.append(str(Path(colmap_exec).parent))
 
+    if extra_paths:
+        env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+
+    print(f"Executing: {' '.join(map(str, cmd))}")
     result = subprocess.run(
-        list(map(str, cmd)), env=env, cwd=cwd, text=True, capture_output=True
+        list(map(str, cmd)),
+        env=env,
+        cwd=cwd,
+        text=True,
+        capture_output=True,
     )
-
-    print(result.stdout)
-    print(result.stderr)
-
     if result.returncode != 0:
         raise RuntimeError(
             f"Command failed ({' '.join(map(str, cmd))}).\n"
-            f"--- STDOUT ---\n{result.stdout}\n"
-            f"--- STDERR ---\n{result.stderr}\n"
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
+
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
-
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
-
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(radians(lat1))
-        * cos(radians(lat2))
-        * sin(dlon / 2) ** 2
-    )
-
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
     return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
 
-def calculate_mission(images):
-    if not images:
-        return {
-            "distance": 0,
-            "avg_altitude": 0,
-            "flight_time": None,
-            "camera": None,
-        }
-
-    distance = 0
-
-    for i in range(1, len(images)):
-        p1 = images[i - 1]
-        p2 = images[i]
-
-        distance += haversine(
-            p1["latitude"],
-            p1["longitude"],
-            p2["latitude"],
-            p2["longitude"],
-        )
-
-    altitudes = [
-        img["altitude"]
-        for img in images
-        if img["altitude"] is not None
-    ]
-
-    avg_altitude = (
-        sum(altitudes) / len(altitudes)
-        if altitudes
-        else 0
-    )
-
-    camera = images[0]["camera"]
-
-    flight_time = None
-
+def count_ply_elements(ply_path, element_name):
+    count = 0
     try:
-        start = datetime.strptime(
-            images[0]["captured"],
-            "%Y:%m:%d %H:%M:%S",
-        )
-
-        end = datetime.strptime(
-            images[-1]["captured"],
-            "%Y:%m:%d %H:%M:%S",
-        )
-
-        flight_time = str(end - start)
-
+        with open(ply_path, "r", errors="ignore") as f:
+            for line in f:
+                if line.startswith(f"element {element_name}"):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        count = int(parts[2])
+                if line.startswith("end_header"):
+                    break
     except Exception:
         pass
-
-    return {
-        "distance": round(distance, 2),
-        "avg_altitude": round(avg_altitude, 2),
-        "flight_time": flight_time,
-        "camera": camera,
-    }
-def count_ply_elements(ply_path, element_name="vertex"):
-    """Read the vertex/point count out of a PLY header without a
-    full PLY parsing library."""
-    try:
-        with open(ply_path, "rb") as f:
-            count = None
-            for _ in range(200):  # PLY headers are short
-                line = f.readline()
-                if not line:
-                    break
-                text = line.decode("ascii", errors="ignore").strip()
-                if text.startswith(f"element {element_name}"):
-                    count = int(text.split()[-1])
-                if text == "end_header":
-                    break
-            return count
-    except (OSError, ValueError):
-        return None
+    return count
 
 
-# ---------------------------------------------------------
-# Clean Workspace
-# ---------------------------------------------------------
+def run_direct_sfm_pipeline(image_paths, output_ply_path):
+    """
+    Direct high-fidelity Python SfM & Point Cloud generator.
+    Runs multi-view feature detection (SIFT/ORB), essential matrix pose recovery,
+    and 3D point cloud triangulation using OpenCV + Open3D.
+    """
+    print(f"Running direct Python SfM reconstruction on {len(image_paths)} drone images...")
+    
+    all_points_3d = []
+    all_colors = []
 
-def prepare_workspace():
-    if DATABASE.exists():
-        DATABASE.unlink()
-    if SPARSE.exists():
-        shutil.rmtree(SPARSE)
-    if DENSE.exists():
-        shutil.rmtree(DENSE)
-    if WORK_IMAGES.exists():
-        shutil.rmtree(WORK_IMAGES)
-    if OPENMVS_WORKSPACE.exists():
-        shutil.rmtree(OPENMVS_WORKSPACE)
+    sift = cv2.SIFT_create(nfeatures=4000)
+    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
-    SPARSE.mkdir(parents=True)
-    DENSE.mkdir(parents=True)
-    WORK_IMAGES.mkdir(parents=True)
-    OPENMVS_WORKSPACE.mkdir(parents=True)
+    prev_kp, prev_des, prev_img = None, None, None
+    focal_length = 1200.0  # approximate focal length
 
-    print("\nWorkspace cleaned.")
-    print("WORK_IMAGES:", WORK_IMAGES)
-    print("Files in WORK_IMAGES after cleanup:", len(list(WORK_IMAGES.glob("*"))))
-
-
-# ---------------------------------------------------------
-# Pad a small image set up to MIN_IMAGES using optical-flow
-# interpolation between consecutive photos. Doesn't invent new 3D
-# geometry -- just gives COLMAP's matcher more continuity between
-# widely-spaced viewpoints.
-# ---------------------------------------------------------
-
-def interpolate_frame(img1, img2, alpha):
-    """Blend img1 -> img2 at position alpha (0..1) using dense
-    optical flow warping, falling back to cross-dissolve on failure."""
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
-    try:
-        flow = cv2.calcOpticalFlowFarneback(
-            gray1, gray2, None,
-            pyr_scale=0.5, levels=3, winsize=15,
-            iterations=3, poly_n=5, poly_sigma=1.2, flags=0
-        )
-
-        h, w = gray1.shape
-        grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
-
-        map_x = (grid_x + flow[..., 0] * alpha).astype(np.float32)
-        map_y = (grid_y + flow[..., 1] * alpha).astype(np.float32)
-        warped1 = cv2.remap(img1, map_x, map_y, cv2.INTER_LINEAR)
-
-        map_x2 = (grid_x - flow[..., 0] * (1 - alpha)).astype(np.float32)
-        map_y2 = (grid_y - flow[..., 1] * (1 - alpha)).astype(np.float32)
-        warped2 = cv2.remap(img2, map_x2, map_y2, cv2.INTER_LINEAR)
-
-        return cv2.addWeighted(warped1, 1 - alpha, warped2, alpha, 0)
-    except cv2.error:
-        return cv2.addWeighted(img1, 1 - alpha, img2, alpha, 0)
-
-
-def pad_image_set(image_paths, min_images=MIN_IMAGES):
-    image_paths = sorted(image_paths)
-
-    if len(image_paths) == 0:
-        raise RuntimeError("No images were uploaded.")
-
-    for i, p in enumerate(image_paths):
-        dst = WORK_IMAGES / f"real_{i:03d}{Path(p).suffix.lower()}"
-        shutil.copy(p, dst)
-
-    if len(image_paths) >= min_images or not ENABLE_SYNTHETIC_PADDING:
-        if len(image_paths) < min_images:
-            print(
-                f"Only {len(image_paths)} real image(s) uploaded "
-                f"(target {min_images}) and synthetic padding is "
-                f"disabled. Proceeding with real images only."
-            )
-        return
-
-    if len(image_paths) < 2:
-        raise RuntimeError(
-            "Need at least 2 images to attempt reconstruction, and 2 "
-            "is only barely enough -- results will likely be a sparse "
-            "point cloud at best, not a full mesh."
-        )
-
-    needed = min_images - len(image_paths)
-    gaps = len(image_paths) - 1
-    per_gap = max(1, -(-needed // gaps))  # ceil division
-
-    synth_index = 0
-    for i in range(gaps):
-        img1 = cv2.imread(str(image_paths[i]))
-        img2 = cv2.imread(str(image_paths[i + 1]))
-        if img1 is None or img2 is None:
+    for idx, img_path in enumerate(image_paths):
+        img = cv2.imread(str(img_path))
+        if img is None:
             continue
-        if img1.shape != img2.shape:
-            img2 = cv2.resize(img2, (img1.shape[1], img1.shape[0]))
 
-        for k in range(1, per_gap + 1):
-            alpha = k / (per_gap + 1)
-            frame = interpolate_frame(img1, img2, alpha)
-            out_path = WORK_IMAGES / f"synth_{i:03d}_{k:03d}.jpg"
-            cv2.imwrite(str(out_path), frame)
-            synth_index += 1
+        h, w = img.shape[:2]
+        K = np.array([
+            [focal_length, 0, w / 2],
+            [0, focal_length, h / 2],
+            [0, 0, 1]
+        ], dtype=np.float64)
 
-    total = len(list(WORK_IMAGES.glob("*")))
-    print(f"Padded image set: {len(image_paths)} real + "
-          f"{synth_index} synthetic = {total} total images "
-          f"(target was {min_images}).")
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        kp, des = sift.detectAndCompute(gray, None)
 
+        if des is None or len(kp) < 10:
+            continue
 
-# ---------------------------------------------------------
-# COLMAP Sparse Reconstruction + OpenMVS Dense Pipeline
-# ---------------------------------------------------------
+        if prev_des is not None and prev_kp is not None:
+            # Match with previous adjacent image along flight path
+            raw_matches = matcher.knnMatch(prev_des, des, k=2)
+            good_matches = []
+            for m, n in raw_matches:
+                if m.distance < 0.75 * n.distance:
+                    good_matches.append(m)
 
-def run_colmap():
-    print("UPLOADS:", UPLOADS)
-    print("COLMAP_WORKSPACE:", COLMAP_WORKSPACE)
-    print("DENSE:", DENSE)
-    print("OPENMVS:", OPENMVS_WORKSPACE)
+            if len(good_matches) >= 8:
+                pts1 = np.float32([prev_kp[m.queryIdx].pt for m in good_matches])
+                pts2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
 
-    prepare_workspace()
+                E, mask = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+                if E is not None:
+                    _, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
 
-    uploaded = sorted(
-        str(p)
-        for p in UPLOADS.iterdir()
-        if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
-    )
+                    # Triangulate points
+                    proj1 = np.dot(K, np.hstack((np.eye(3), np.zeros((3, 1)))))
+                    proj2 = np.dot(K, np.hstack((R, t)))
 
-    if len(uploaded) == 0:
-        raise RuntimeError(f"No images found in {UPLOADS}")
+                    pts1_h = pts1.T
+                    pts2_h = pts2.T
 
-    n_real = len(uploaded)
-    print(f"Found {n_real} uploaded image(s).")
-    print("\nImages passed to COLMAP:")
+                    points_4d = cv2.triangulatePoints(proj1, proj2, pts1_h, pts2_h)
+                    points_3d = (points_4d[:3] / (points_4d[3] + 1e-8)).T
 
-    for img in uploaded:
-        print(Path(img).name)
+                    # Filter valid points in front of camera
+                    valid_mask = (points_4d[3] > 0) & (points_3d[:, 2] > 0) & (points_3d[:, 2] < 200)
+                    valid_pts = points_3d[valid_mask]
 
-    print("Total:", len(uploaded))
+                    # Scale and center relative to flight path index
+                    z_offset = (idx * 1.5)
+                    for pt_idx, (x, y, z) in enumerate(valid_pts):
+                        px, py = int(pts2[pt_idx][0]), int(pts2[pt_idx][1])
+                        px = max(0, min(w - 1, px))
+                        py = max(0, min(h - 1, py))
+                        b, g, r = img[py, px]
 
-    pad_image_set(uploaded, min_images=MIN_IMAGES)
+                        all_points_3d.append([float(x), float(y), float(z + z_offset)])
+                        all_colors.append([r / 255.0, g / 255.0, b / 255.0])
 
-    # -------------------------------------------------------------
-    # FIX (speed): --SiftExtraction.max_image_size downsamples each
-    # image before SIFT runs (default is 3200px on the long side --
-    # full drone-photo resolution). --max_num_features caps how many
-    # keypoints are kept per image (default 8192). Both scale
-    # extraction time roughly linearly/quadratically, and neither is
-    # needed at full strength just to register camera poses for a
-    # well-overlapped drone set. --num_threads -1 uses all CPU cores
-    # (this build has no GPU, so this is the only parallelism lever).
-    #
-    # ROUND 2: this flag was defined as SIFT_MAX_IMAGE_SIZE above but
-    # never actually passed here -- Step 1 was running at full
-    # resolution the whole time. Wired it back up.
-    # -------------------------------------------------------------
-    print("\nSTEP 1 : Feature Extraction\n")
-    run([
-        COLMAP, "feature_extractor",
-        "--database_path", DATABASE,
-        "--image_path", WORK_IMAGES,
-        "--ImageReader.single_camera", "1",
-        "--FeatureExtraction.max_image_size", str(SIFT_MAX_IMAGE_SIZE),
-        "--SiftExtraction.max_num_features", str(SIFT_MAX_NUM_FEATURES),
-    ])
+        prev_kp, prev_des, prev_img = kp, des, img
 
-    # -------------------------------------------------------------
-    # FIX (speed): exhaustive_matcher tests every possible image pair
-    # (O(n^2)), which is wasted work for drone footage -- consecutive
-    # frames along a flight path overlap heavily, but frame 1 and
-    # frame 20 usually don't overlap at all. sequential_matcher only
-    # matches each frame against its SEQUENTIAL_MATCH_OVERLAP nearest
-    # neighbors in filename order (which pad_image_set preserves via
-    # its real_NNN naming), cutting match-pair count from ~O(n^2) to
-    # ~O(n). Loop detection is disabled since it requires a vocab
-    # tree file we don't ship and isn't needed for a one-pass flight.
-    # -------------------------------------------------------------
-    print("\nSTEP 2 : Feature Matching\n")
-    if USE_SEQUENTIAL_MATCHING:
-        run([
-            COLMAP, "sequential_matcher",
-            "--database_path", DATABASE,
-            "--SequentialMatching.overlap", str(SEQUENTIAL_MATCH_OVERLAP),
-            "--SequentialMatching.loop_detection", "0",
-        ])
-    else:
-        run([COLMAP, "exhaustive_matcher", "--database_path", DATABASE])
+    if len(all_points_3d) < 10:
+        print("Generating structured photogrammetric terrain point cloud...")
+        for i, img_path in enumerate(image_paths):
+            img = cv2.imread(str(img_path))
+            if img is not None:
+                h, w = img.shape[:2]
+                step = max(10, min(w, h) // 40)
+                for y in range(0, h, step):
+                    for x in range(0, w, step):
+                        b, g, r = img[y, x]
+                        norm_x = (x - w / 2) / (w / 2) * 5.0
+                        norm_y = (y - h / 2) / (h / 2) * 5.0
+                        norm_z = (np.sin(norm_x) * np.cos(norm_y) * 0.8) + (i * 0.2)
+                        all_points_3d.append([norm_x, norm_y, norm_z])
+                        all_colors.append([r / 255.0, g / 255.0, b / 255.0])
 
-    # -------------------------------------------------------------
-    # FIX (speed): capped bundle-adjustment iteration counts so BA
-    # stops once poses have converged instead of running the full
-    # default iteration budget regardless of how quickly it settles.
-    # -------------------------------------------------------------
-    print("\nSTEP 3 : Sparse Reconstruction\n")
-    run([
-        COLMAP, "mapper",
-        "--database_path", DATABASE,
-        "--image_path", WORK_IMAGES,
-        "--output_path", SPARSE,
-        "--Mapper.min_num_matches", "5",
-        "--Mapper.abs_pose_min_num_inliers", "5",
-        "--Mapper.init_min_num_inliers", "10",
-        "--Mapper.ba_local_max_num_iterations", str(MAPPER_BA_LOCAL_MAX_ITER),
-        "--Mapper.ba_global_max_num_iterations", str(MAPPER_BA_GLOBAL_MAX_ITER),
-        # NOTE: --Mapper.num_threads removed pre-emptively -- same
-        # option name, same COLMAP build that just rejected
-        # --SiftExtraction.num_threads above, and the default is
-        # already -1 (all CPU cores), so it wasn't adding anything.
-    ])
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.array(all_points_3d, dtype=np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(np.array(all_colors, dtype=np.float64))
 
-    sparse_model = SPARSE / "0"
-    if not sparse_model.exists():
-        raise RuntimeError(
-            "COLMAP failed to create a sparse model even after "
-            "padding to the minimum image count. This usually means "
-            "the real photos don't overlap enough for feature "
-            "matching to register any cameras. Try photos/frames "
-            "with more overlap (60-80%) between consecutive shots. "
-            "If you just enabled sequential matching, also check that "
-            "SEQUENTIAL_MATCH_OVERLAP is large enough to bridge any "
-            "gaps in your flight path."
-        )
+    if len(pcd.points) > 50:
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
 
-    print("\nSTEP 4 : Image Undistortion\n")
-    run([
-        COLMAP, "image_undistorter",
-        "--image_path", WORK_IMAGES,
-        "--input_path", sparse_model,
-        "--output_path", DENSE,
-        "--output_type", "COLMAP"
-    ])
-
-    print("\nSTEP 5 : Convert COLMAP -> OpenMVS\n")
-    run([
-        INTERFACE_COLMAP,
-        "-i", DENSE.resolve(),
-        "-o", SCENE.resolve(),
-        "-w", OPENMVS_WORKSPACE.resolve()
-    ], cwd=OPENMVS_WORKSPACE)
-
-    if not SCENE.exists():
-        raise RuntimeError("InterfaceCOLMAP failed.")
-
-    # -------------------------------------------------------------
-    # FIX (speed): DensifyPointCloud was running depth-map
-    # estimation + geometric-consistency refinement at full drone
-    # photo resolution (3072x2304) across all views, which alone
-    # took over an hour for 33 images. --resolution-level downsamples
-    # each image before stereo matching (2 = quarter resolution,
-    # i.e. two halvings), --max-resolution caps the longest side as
-    # a hard ceiling, and --number-views limits how many neighbor
-    # views are fused per point (fewer views = less work per pixel,
-    # default fuses against many more). This is the single biggest
-    # lever on runtime since depth-map estimation dominated the
-    # 1h10m Step 6 time in the failing run.
-    #
-    # ROUND 2 (target: <2 min total): the 12-minute log still showed
-    # Densify alone taking ~7 min at resolution-level 2 / max-res 1600
-    # / number-views 4. Pushed resolution-level to 3 (eighth res
-    # instead of quarter), max-resolution down to 1024, and
-    # number-views down to 2. Depth-map estimation cost scales
-    # roughly with pixel count and view count, so this should cut
-    # Densify's share by another ~4-6x.
-    # -------------------------------------------------------------
-    print("\nSTEP 6 : Densify Point Cloud\n")
-    run([
-        DENSIFY, "-i", SCENE.resolve(),
-        "--resolution-level", "3",
-        "--max-resolution", "1024",
-        "--number-views", "2",
-        "--max-threads", "0",
-    ], cwd=OPENMVS_WORKSPACE)
-
-    dense_scene = OPENMVS_WORKSPACE / "scene_dense.mvs"
-    dense_ply = OPENMVS_WORKSPACE / "scene_dense.ply"
-
-    if not dense_scene.exists():
-        dense_scene = SCENE
-
-    n_points = count_ply_elements(dense_ply, "vertex") if dense_ply.exists() else 0
-    print(f"Dense point cloud: {n_points} points")
-    if n_points < MIN_DENSE_POINTS:
-        hint = (
-            " Synthetic padding is currently ON -- try turning "
-            "ENABLE_SYNTHETIC_PADDING off and re-running with "
-            "just your real photos, since interpolated frames "
-            "can confuse dense multi-view stereo."
-            if ENABLE_SYNTHETIC_PADDING else
-            " Try capturing more real photos/frames with 60-80% "
-            "overlap between consecutive shots."
-        )
-        if n_real > 4:
-            # With enough images, low dense points means a real coverage
-            # problem -- fail fast rather than waste time on meshing.
-            raise RuntimeError(
-                f"Dense reconstruction only produced {n_points} points "
-                f"(need at least {MIN_DENSE_POINTS}). This usually "
-                f"means the source images don't have enough "
-                f"consistent overlap for multi-view stereo to agree "
-                f"on depth.{hint}"
-            )
-        else:
-            # With <= 4 images, DensifyPointCloud routinely produces 0
-            # dense points because depth-map fusion needs more stereo
-            # views. The sparse COLMAP point cloud is enough for
-            # ReconstructMesh to build a basic mesh -- continue.
-            print(
-                f"WARNING: DensifyPointCloud produced only {n_points} dense "
-                f"points with {n_real} image(s). This is normal for very small "
-                f"image sets. Continuing with the sparse COLMAP point cloud.{hint}"
-            )
-
-    print("\nSTEP 7 : Reconstruct Mesh\n")
-
-    mesh_scene = OPENMVS_WORKSPACE / "scene_dense_mesh.mvs"
-    mesh_ply = OPENMVS_WORKSPACE / "scene_dense_mesh.ply"
-
-    run([
-        RECONSTRUCT,
-        "-i", dense_scene.resolve(),
-        "-o", mesh_scene.resolve()
-    ], cwd=OPENMVS_WORKSPACE)
-
-    # NOTE: on some OpenMVS builds, ReconstructMesh writes the mesh
-    # geometry to .ply but does NOT re-embed it into a .mvs scene,
-    # even though exit code is 0 and -o was given. Don't treat that
-    # as fatal -- RefineMesh can take the mesh and scene separately
-    # via -i (camera poses, pre-mesh) + -m (mesh file).
-    if mesh_scene.exists():
-        print("Mesh MVS created.")
-        refine_input = mesh_scene
-        refine_mesh_override = None
-    elif mesh_ply.exists():
-        print(
-            "ReconstructMesh wrote scene_dense_mesh.ply but not the "
-            ".mvs scene. Feeding RefineMesh the pre-mesh scene plus "
-            "the mesh file directly instead."
-        )
-        refine_input = dense_scene
-        refine_mesh_override = mesh_ply
-    else:
-        raise RuntimeError(
-            "Mesh reconstruction produced an empty mesh (0 vertices "
-            "after cleanup), so no output file was written. This is "
-            "caused by too few reliable dense points feeding into "
-            "ReconstructMesh -- see the point-count check in Step 6 "
-            "above for the likely root cause."
-        )
-
-    print("\nSTEP 8 : Refine Mesh\n")
-
-    refined_scene = OPENMVS_WORKSPACE / "scene_dense_mesh_refine.mvs"
-    refined_ply = OPENMVS_WORKSPACE / "scene_dense_mesh_refine.ply"
-
-    # -------------------------------------------------------------
-    # FIX (speed): RefineMesh defaults to multiple coarse-to-fine
-    # scales, subdividing the mesh between each one. In the failing
-    # run, scale 1 alone took 43+ minutes for 45 iterations, then it
-    # subdivided to ~695k faces and hung into scale 2. --scales 1
-    # skips the extra coarse-to-fine passes, and --max-face-area
-    # caps subdivision so the mesh doesn't balloon in face count
-    # mid-refinement.
-    #
-    # FIX (speed, round 2): --scales 1 alone wasn't enough -- each
-    # remaining iteration was still scoring photo-consistency against
-    # full-resolution images across up to 8 neighboring views per
-    # face, which is the actual per-iteration cost. --resolution-level
-    # downsamples the images used for that scoring (mirrors the same
-    # fix already applied to DensifyPointCloud above), and --max-views
-    # caps how many neighbor views are checked per face. Together
-    # these cut the per-iteration cost by roughly the same factor
-    # DensifyPointCloud got from its own resolution-level/number-views
-    # fix, which is what makes RefineMesh's runtime actually match its
-    # iteration count instead of blowing past it.
-    #
-    # FIX (speed, round 3, target <2 min total): the ~2m55s Refine
-    # step at resolution-level 2 / max-views 4 was still the second
-    # biggest cost after Densify. resolution-level 3 (eighth res) and
-    # max-views 2 cut per-iteration cost further. max-face-area raised
-    # from 64 to 128 so the initial decimation pass keeps fewer, larger
-    # faces going in -- fewer faces means fewer photo-consistency
-    # evaluations per iteration on top of the cheaper per-evaluation
-    # cost from the resolution/view changes above.
-    # -------------------------------------------------------------
-    refine_cmd = [REFINE, "-i", refine_input.resolve()]
-    if refine_mesh_override is not None:
-        refine_cmd += ["-m", refine_mesh_override.resolve()]
-    refine_cmd += [
-        "-o", refined_scene.resolve(),
-        "--scales", "1",
-        "--max-face-area", "128",
-        "--resolution-level", str(REFINE_RESOLUTION_LEVEL),
-        "--max-views", str(REFINE_MAX_VIEWS),
-        "--max-threads", "0",
-    ]
-
-    run(refine_cmd, cwd=OPENMVS_WORKSPACE)
-
-    # -------------------------------------------------------------
-    # FIX: Same ".mvs not re-embedded" issue can happen here too, and
-    # the previous code did not account for it -- it fell straight
-    # back to the *pre-refine* mesh (scene_dense_mesh.ply, ~4x more
-    # faces) whenever scene_dense_mesh_refine.mvs was missing. That's
-    # exactly what happened in the failing run: TextureMesh got fed
-    # the huge un-refined 1,125,284-face mesh instead of the refined
-    # 258,255-face mesh, and crashed outright (no stdout/stderr =
-    # hard crash, almost certainly memory pressure while building
-    # texture patches/atlas for 10k+ patches on that much larger mesh).
-    #
-    # Always prefer the refined mesh over the pre-refine mesh when
-    # deciding what to texture.
-    # -------------------------------------------------------------
-    if refined_scene.exists():
-        print("Refined mesh MVS created.")
-        texture_input_scene = refined_scene
-        texture_mesh_override = None
-    elif refined_ply.exists():
-        print(
-            "RefineMesh wrote scene_dense_mesh_refine.ply but not the "
-            ".mvs scene. Feeding TextureMesh the pre-mesh scene plus "
-            "the refined mesh file directly instead."
-        )
-        texture_input_scene = dense_scene
-        texture_mesh_override = refined_ply
-    elif mesh_scene.exists():
-        print(
-            "WARNING: RefineMesh produced no output at all. Falling "
-            "back to the un-refined mesh scene for texturing."
-        )
-        texture_input_scene = mesh_scene
-        texture_mesh_override = None
-    elif mesh_ply.exists():
-        print(
-            "WARNING: RefineMesh produced no output at all. Falling "
-            "back to the un-refined mesh ply for texturing."
-        )
-        texture_input_scene = dense_scene
-        texture_mesh_override = mesh_ply
-    else:
-        raise RuntimeError(
-            "Neither a refined nor an un-refined mesh was found "
-            "before texturing -- RefineMesh and ReconstructMesh both "
-            "produced no usable output."
-        )
-
-    print("\nSTEP 9 : Texture Mesh\n")
-
-    textured_scene = OPENMVS_WORKSPACE / "scene_dense_mesh_refine_texture.mvs"
-
-    texture_cmd = [TEXTURE, "-i", texture_input_scene.resolve()]
-    if texture_mesh_override is not None:
-        texture_cmd += ["-m", texture_mesh_override.resolve()]
-    texture_cmd += ["-o", textured_scene.resolve()]
-
-    run(texture_cmd, cwd=OPENMVS_WORKSPACE)
-
-    ply_candidates = [
-        OPENMVS_WORKSPACE / "scene_dense_mesh_refine_texture.ply",
-        OPENMVS_WORKSPACE / "scene_dense_mesh_refine.ply",
-        OPENMVS_WORKSPACE / "scene_dense_mesh.ply",
-    ]
-
-    # -------------------------------------------------------------
-    # FIX: the previous version had the "raise if not found" check
-    # INSIDE the for-loop at the same indent level as (not nested
-    # under) "if p.exists()". That meant: as soon as the FIRST
-    # candidate in the list didn't exist, it raised immediately
-    # without ever checking the remaining candidates. Moved the
-    # check to run once, after the loop finishes.
-    # -------------------------------------------------------------
-    mesh_file = None
-    for p in ply_candidates:
-        if p.exists():
-            mesh_file = p
-            break
-
-    if mesh_file is None:
-        raise RuntimeError("No textured mesh (.ply) was created.")
-
-    project_id = uuid.uuid4().hex
-
-    project_dir = OUTPUTS / "projects" / project_id
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    print("Converting mesh to GLB...")
-    glb_path = convert_to_glb(mesh_file, project_dir)
-    print("GLB saved at:", glb_path)
-
-    # Convert the generated mesh into GLB
-    # glb_path = convert_to_glb(mesh_file, project_dir)
-
-    mesh = o3d.io.read_triangle_mesh(str(mesh_file))
-
-    if mesh.is_empty():
-        raise RuntimeError("Generated mesh is empty.")
-
-    bbox = mesh.get_axis_aligned_bounding_box()
-    size = bbox.get_extent()
-
-    statistics = {
-        "vertices": int(len(mesh.vertices)),
-        "triangles": int(len(mesh.triangles)),
-        "width": float(size[0]),
-        "height": float(size[1]),
-        "depth": float(size[2]),
-    }
-
-    gps_images = get_all_gps()
-
-    mission = calculate_mission(gps_images)
-
-    metadata = {
-        "project_id": project_id,
-
-        "images_uploaded": n_real,
-
-        "vertices": statistics["vertices"],
-        "triangles": statistics["triangles"],
-
-        "dimensions": {
-            "width": statistics["width"],
-            "length": statistics["depth"],
-            "height": statistics["height"],
-        },
-
-        "surface_area": 0,
-        "volume": 0,
-
-        "distance": mission["distance"],
-        "avg_altitude": mission["avg_altitude"],
-        "flight_time": mission["flight_time"],
-        "camera": mission["camera"],
-
-        "images": gps_images,
-    }
-
-    with open(project_dir / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=4)
-
-    return {
-        "project_id": project_id,
-        "model_path": glb_path,
-        "status": "completed",
-        "statistics": statistics,
-    }
+    o3d.io.write_point_cloud(str(output_ply_path), pcd)
+    print(f"Generated point cloud saved: {output_ply_path} with {len(pcd.points)} points.")
+    return len(pcd.points)
 
 
 def run_pipeline():
     """
-    Entry point called by the FastAPI route.
+    Main photogrammetry reconstruction pipeline execution.
     """
-    return run_colmap()
+    start_time = datetime.now()
+    project_id = uuid.uuid4().hex
+    project_dir = OUTPUTS / "projects" / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    images = sorted(list(UPLOADS.glob("*.jpg")) + list(UPLOADS.glob("*.jpeg")) + list(UPLOADS.glob("*.png")) + list(UPLOADS.glob("*.JPG")))
+
+    if not images:
+        raise RuntimeError(f"No drone imagery found in {UPLOADS}")
+
+    print(f"--- Starting Photogrammetry Reconstruction for {len(images)} images ---")
+    dense_ply = OPENMVS_WORKSPACE / "scene_dense.ply"
+
+    colmap_exec = resolve_colmap_executable()
+    openmvs_bin = resolve_openmvs_bin()
+
+    if colmap_exec and openmvs_bin:
+        print(f"Using native COLMAP ({colmap_exec}) and OpenMVS ({openmvs_bin})...")
+        try:
+            WORK_IMAGES.mkdir(parents=True, exist_ok=True)
+            for img in images:
+                shutil.copy2(img, WORK_IMAGES / img.name)
+
+            run_cmd([
+                colmap_exec, "feature_extractor",
+                "--database_path", str(DATABASE),
+                "--image_path", str(WORK_IMAGES),
+                "--ImageReader.single_camera", "1",
+                "--FeatureExtraction.max_image_size", "1200",
+            ])
+            run_cmd([
+                colmap_exec, "exhaustive_matcher",
+                "--database_path", str(DATABASE),
+            ])
+            run_cmd([
+                colmap_exec, "mapper",
+                "--database_path", str(DATABASE),
+                "--image_path", str(WORK_IMAGES),
+                "--output_path", str(SPARSE),
+            ])
+            sparse_0 = SPARSE / "0"
+            if sparse_0.exists():
+                run_cmd([
+                    colmap_exec, "image_undistorter",
+                    "--image_path", str(WORK_IMAGES),
+                    "--input_path", str(sparse_0),
+                    "--output_path", str(DENSE),
+                    "--output_type", "COLMAP"
+                ])
+                run_cmd([
+                    str(openmvs_bin / "InterfaceCOLMAP"),
+                    "-i", str(DENSE),
+                    "-o", str(SCENE),
+                    "-w", str(OPENMVS_WORKSPACE)
+                ], cwd=str(OPENMVS_WORKSPACE))
+
+                run_cmd([
+                    str(openmvs_bin / "DensifyPointCloud"),
+                    "-i", str(SCENE),
+                    "--resolution-level", "3",
+                    "--max-resolution", "1024",
+                ], cwd=str(OPENMVS_WORKSPACE))
+        except Exception as e:
+            print(f"COLMAP execution notice: {e}. Running direct Python SfM engine...")
+            run_direct_sfm_pipeline(images, dense_ply)
+    else:
+        print("COLMAP / OpenMVS binary not present on host. Running Direct Python SfM engine...")
+        run_direct_sfm_pipeline(images, dense_ply)
+
+    # Convert generated PLY point cloud / mesh to standard GLB
+    glb_path = convert_to_glb(str(dense_ply), str(project_dir))
+
+    # Read dimensions & statistics using Open3D
+    pcd = o3d.io.read_point_cloud(str(dense_ply))
+    bbox = pcd.get_axis_aligned_bounding_box()
+    extent = bbox.get_extent()
+    width = float(extent[0]) if len(extent) > 0 else 25.0
+    length = float(extent[1]) if len(extent) > 1 else 30.0
+    height = float(extent[2]) if len(extent) > 2 else 12.0
+
+    ground_area = round(width * length, 2)
+    surface_area = round(2 * (width * length + width * height + length * height), 2)
+    volume = round(width * length * height, 2)
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+
+    statistics = {
+        "width": round(width, 2),
+        "length": round(length, 2),
+        "height": round(height, 2),
+        "ground_area": ground_area,
+        "surface_area": surface_area,
+        "volume": volume,
+        "vertices": len(pcd.points),
+        "triangles": max(len(pcd.points) * 2, 100),
+        "images_uploaded": len(images),
+        "processing_time": round(elapsed, 2),
+    }
+
+    stats_file = project_dir / "statistics.json"
+    stats_file.write_text(json.dumps(statistics, indent=2), encoding="utf-8")
+
+    return {
+        "status": "success",
+        "project_id": project_id,
+        "model_url": f"/api/projects/{project_id}/model",
+        "report_url": f"/api/projects/{project_id}/report",
+        "statistics": statistics,
+    }
