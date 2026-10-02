@@ -59,7 +59,12 @@ class DXFParser:
     @staticmethod
     def parse(file_path: str):
 
-        doc = ezdxf.readfile(file_path)
+        try:
+            doc = ezdxf.readfile(file_path)
+        except Exception:
+            from ezdxf import recover
+            doc, auditor = recover.readfile(file_path)
+        
         msp = doc.modelspace()
 
         drawing = ParsedDrawing()
