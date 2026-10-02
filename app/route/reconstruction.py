@@ -1,8 +1,10 @@
 import asyncio
 from pathlib import Path
+from typing import Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -19,6 +21,11 @@ router = APIRouter(
 )
 
 
+class GenerateModelRequest(BaseModel):
+    upload_id: Optional[str] = None
+    project_name: Optional[str] = None
+
+
 @router.get("/diagnostics")
 async def get_diagnostics():
     """
@@ -32,12 +39,16 @@ async def get_diagnostics():
 
 @router.post("/generate")
 async def generate_model(
+    payload: Optional[GenerateModelRequest] = Body(None),
+    upload_id: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        # Run reconstruction pipeline asynchronously in a worker thread to keep ASGI event loop non-blocking
-        result = await asyncio.to_thread(run_pipeline)
+        target_upload_id = (payload.upload_id if payload else None) or upload_id
+
+        # Run reconstruction pipeline asynchronously in worker thread
+        result = await asyncio.to_thread(run_pipeline, upload_id=target_upload_id)
 
         project = Project(
             project_id=result["project_id"],
@@ -108,4 +119,3 @@ async def get_model(
         media_type="model/gltf-binary",
         filename="model.glb",
     )
-

@@ -6,10 +6,13 @@ Provides:
 """
 
 import gc
-from typing import List
+import uuid
 import shutil
+from datetime import datetime
+from typing import List, Optional
+from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, status, UploadFile as FastAPIUploadFile
+from fastapi import APIRouter, File, Form, HTTPException, status, UploadFile as FastAPIUploadFile
 
 from app.utils import save_upload, UPLOAD_DIR
 
@@ -26,6 +29,7 @@ router = APIRouter(
 )
 async def upload_images(
     files: List[FastAPIUploadFile] = File(...),
+    upload_id: Optional[str] = Form(None),
 ):
     if not files:
         raise HTTPException(
@@ -33,21 +37,23 @@ async def upload_images(
             detail="No files were provided.",
         )
 
+    session_upload_id = upload_id or f"UP_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    session_dir = UPLOAD_DIR / session_upload_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
     # -------------------------------------------------
-    # Clear previous uploaded images
+    # Also keep latest batch in root UPLOAD_DIR
     # -------------------------------------------------
     if UPLOAD_DIR.exists():
-        shutil.rmtree(UPLOAD_DIR)
+        for old_file in list(UPLOAD_DIR.glob("*.jpg")) + list(UPLOAD_DIR.glob("*.jpeg")) + list(UPLOAD_DIR.glob("*.png")):
+            try:
+                old_file.unlink()
+            except Exception:
+                pass
 
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-    # -------------------------------------------------
-    # Debug: Print received files
-    # -------------------------------------------------
     print("\n==============================")
-    print("UPLOAD API CALLED")
+    print(f"UPLOAD API CALLED: {session_upload_id}")
     print("==============================")
-
     print(f"Received {len(files)} file(s):")
 
     for i, file in enumerate(files, start=1):
@@ -60,32 +66,25 @@ async def upload_images(
 
     for file in files:
         try:
-            result = await save_upload(file)
+            # Save into session dir
+            result = await save_upload(file, target_dir=session_dir)
+            # Also copy to root upload dir for legacy backwards compatibility
+            root_copy = UPLOAD_DIR / Path(result["saved_name"]).name
+            shutil.copy2(result["path"], root_copy)
             uploaded.append(result)
         finally:
-            # Ensure file handle and spool buffer are closed
             await file.close()
 
-    # Clear references and force garbage collection to release 250MB+ multipart heap immediately
     del files
     gc.collect()
 
-    # -------------------------------------------------
-    # Debug: Verify upload folder
-    # -------------------------------------------------
-    print("\nFiles saved in upload folder:")
-
-    saved_files = list(UPLOAD_DIR.iterdir())
-
-    for f in saved_files:
-        print(f.name)
-
-    print(f"Total saved: {len(saved_files)}")
+    print(f"\nSaved {len(uploaded)} files in session: {session_dir}")
     print("==============================\n")
 
     return {
         "success": True,
         "message": f"{len(uploaded)} image(s) uploaded successfully.",
         "count": len(uploaded),
+        "upload_id": session_upload_id,
         "files": uploaded,
-    }
+    }

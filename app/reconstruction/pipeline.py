@@ -223,7 +223,7 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
     return len(pts_arr)
 
 
-def run_pipeline() -> Dict[str, Any]:
+def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, Any]:
     """
     Main 3D Photogrammetry Reconstruction Pipeline.
     1. Validates all uploaded drone images.
@@ -242,11 +242,15 @@ def run_pipeline() -> Dict[str, Any]:
     print("========================================================")
     logger.info(f"RECONSTRUCTION_START: Project {project_id}")
 
-    # Discover uploaded images
-    image_extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG"]
+    # Discover uploaded images from session or default UPLOADS directory
+    source_dir = upload_dir or (UPLOADS / upload_id if upload_id and (UPLOADS / upload_id).exists() else UPLOADS)
+    image_extensions = ["*.jpg", "*.jpeg", "*.png", "*.JPG", "*.JPEG", "*.PNG", "*.tif", "*.tiff", "*.TIF", "*.TIFF", "*.webp", "*.WEBP"]
     raw_images = []
     for ext in image_extensions:
-        raw_images.extend(UPLOADS.glob(ext))
+        raw_images.extend(source_dir.glob(ext))
+    if not raw_images and source_dir != UPLOADS:
+        for ext in image_extensions:
+            raw_images.extend(UPLOADS.glob(ext))
     images = sorted(list(set(raw_images)))
 
     print(f"[RECONSTRUCTION_IMAGE_COUNT] {len(images)}")

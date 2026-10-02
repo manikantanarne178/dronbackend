@@ -39,7 +39,7 @@ class UploadFile(_UploadFile):
 # ---------------------------------------------------------------------------
 
 # Allowed image extensions (lowercase, with leading dot)
-ALLOWED_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".cr2", ".dng", ".bmp"}
 
 # Allowed MIME content types
 ALLOWED_CONTENT_TYPES: Set[str] = {
@@ -49,7 +49,7 @@ ALLOWED_CONTENT_TYPES: Set[str] = {
 }
 
 # Maximum file size in bytes (10 MB)
-MAX_FILE_SIZE: int = 10 * 1024 * 1024
+MAX_FILE_SIZE: int = 100 * 1024 * 1024
 
 # Upload destination
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -119,47 +119,40 @@ def generate_unique_filename(extension: str) -> str:
     return f"{uuid.uuid4().hex}{extension}"
 
 
-async def save_upload(file: _UploadFile) -> dict:
+async def save_upload(file: _UploadFile, target_dir: Path = None) -> dict:
     """
-    Validate and save an uploaded image.
+    Validate and save an uploaded image into the designated target directory.
 
-    Returns metadata that will later be stored in the project report.
+    Returns metadata stored for reconstruction.
     """
-
     validate_not_empty(file)
 
     extension = validate_file_extension(file.filename)
-
     validate_content_type(file)
 
     saved_name = generate_unique_filename(extension)
+    dest_dir = target_dir or UPLOAD_DIR
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
-    file_path = UPLOAD_DIR / saved_name
+    file_path = dest_dir / saved_name
 
     total_bytes = 0
 
     async with aiofiles.open(file_path, "wb") as out:
-
         while True:
-
             chunk = await file.read(CHUNK_SIZE)
-
             if not chunk:
                 break
-
             total_bytes += len(chunk)
 
             if total_bytes > MAX_FILE_SIZE:
                 await out.close()
-
                 if file_path.exists():
                     file_path.unlink()
-
                 raise HTTPException(
                     status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    detail=f"{file.filename} exceeds 10 MB limit.",
+                    detail=f"{file.filename} exceeds 100 MB limit.",
                 )
-
             await out.write(chunk)
 
     return {
