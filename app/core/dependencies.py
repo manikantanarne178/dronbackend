@@ -10,16 +10,13 @@ from app.models.user import User
 security = HTTPBearer()
 
 
+
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
 
     token = credentials.credentials
-
-    # ADD THESE TWO LINES
-    print("=" * 50)
-    print("TOKEN RECEIVED:", repr(token))
 
     try:
         payload = jwt.decode(
@@ -28,22 +25,22 @@ def get_current_user(
             algorithms=[ALGORITHM],
         )
 
-        print("PAYLOAD:", payload)
+        sub = str(payload.get("sub", ""))
+        if not sub:
+            raise HTTPException(status_code=401, detail="Invalid token subject")
 
-        user_id = int(payload["sub"])
+        user = None
+        if sub.isdigit():
+            user = db.query(User).filter(User.id == int(sub)).first()
+
+        if not user:
+            user = db.query(User).filter(User.email == sub).first()
 
     except JWTError as e:
-        print("JWT ERROR:", repr(e))
         raise HTTPException(
             status_code=401,
             detail="Invalid token",
         )
-
-    user = (
-        db.query(User)
-        .filter(User.id == user_id)
-        .first()
-    )
 
     if not user:
         raise HTTPException(
@@ -51,4 +48,4 @@ def get_current_user(
             detail="User not found",
         )
 
-    return user
+    return user
