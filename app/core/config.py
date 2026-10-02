@@ -9,8 +9,8 @@ load_dotenv(override=False)
 
 def normalize_database_url(url: Optional[str]) -> str:
     """
-    Safely normalizes database URLs for SQLAlchemy and psycopg (psycopg 3).
-    Converts 'postgres://' and 'postgresql://' prefixes to 'postgresql+psycopg://'.
+    Safely normalizes database URLs for SQLAlchemy and psycopg/psycopg2.
+    Converts 'postgres://' and 'postgresql://' prefixes to standard SQLAlchemy driver format.
     Preserves query parameters (such as sslmode), usernames, passwords, and port configurations.
     Raises ValueError if DATABASE_URL is not set or empty.
     """
@@ -19,14 +19,23 @@ def normalize_database_url(url: Optional[str]) -> str:
 
     url = str(url).strip()
 
+    has_psycopg3 = False
+    try:
+        import psycopg
+        has_psycopg3 = True
+    except ImportError:
+        pass
+
+    driver_prefix = "postgresql+psycopg://" if has_psycopg3 else "postgresql+psycopg2://"
+
     if url.startswith("postgres://"):
-        url = "postgresql+psycopg://" + url[len("postgres://"):]
+        url = driver_prefix + url[len("postgres://"):]
     elif url.startswith("postgresql://"):
-        url = "postgresql+psycopg://" + url[len("postgresql://"):]
-    elif url.startswith("postgresql+psycopg://"):
-        pass  # Already in SQLAlchemy + psycopg3 format
+        url = driver_prefix + url[len("postgresql://"):]
+    elif url.startswith("postgresql+psycopg://") and not has_psycopg3:
+        url = "postgresql+psycopg2://" + url[len("postgresql+psycopg://"):]
     elif url.startswith("sqlite://"):
-        pass  # SQLite format for local testing / development
+        pass
 
     return url
 
@@ -50,4 +59,4 @@ class Settings:
         return normalize_database_url(raw_url)
 
 
-settings = Settings()
+settings = Settings()
