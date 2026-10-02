@@ -7,3 +7,10 @@ def home():
     return {
         "message": "Welcome to DroneVision"
     }
+
+@router.get("/health")
+def health():
+    return {
+        "status": "HEALTHY",
+        "service": "DroneVision API"
+    }
