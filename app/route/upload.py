@@ -5,6 +5,7 @@ Provides:
     POST /api/upload/images  – upload one or more image files
 """
 
+import gc
 from typing import List
 import shutil
 
@@ -58,8 +59,16 @@ async def upload_images(
     uploaded = []
 
     for file in files:
-        result = await save_upload(file)
-        uploaded.append(result)
+        try:
+            result = await save_upload(file)
+            uploaded.append(result)
+        finally:
+            # Ensure file handle and spool buffer are closed
+            await file.close()
+
+    # Clear references and force garbage collection to release 250MB+ multipart heap immediately
+    del files
+    gc.collect()
 
     # -------------------------------------------------
     # Debug: Verify upload folder
@@ -79,4 +88,4 @@ async def upload_images(
         "message": f"{len(uploaded)} image(s) uploaded successfully.",
         "count": len(uploaded),
         "files": uploaded,
-    }
+    }

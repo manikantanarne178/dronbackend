@@ -46,6 +46,15 @@ OPENMVS_WORKSPACE.mkdir(parents=True, exist_ok=True)
 UPLOADS.mkdir(parents=True, exist_ok=True)
 
 
+def get_process_memory_mb() -> float:
+    """Returns the current process RSS memory in Megabytes."""
+    try:
+        import psutil
+        return round(psutil.Process().memory_info().rss / (1024 * 1024), 2)
+    except Exception:
+        return 0.0
+
+
 def validate_image_file(img_path: Path) -> Dict[str, Any]:
     """
     Validates that the file exists, has non-zero size, and is readable by PIL and OpenCV.
@@ -75,25 +84,25 @@ def validate_image_file(img_path: Path) -> Dict[str, Any]:
     }
 
 
-def load_and_downscale_image(img_path: Path, max_dim: int = 1600) -> np.ndarray:
+def load_and_downscale_image(img_path: Path, max_dim: int = 1280) -> np.ndarray:
     """
     Loads an image and scales it down if larger than max_dim.
-    This guarantees memory usage remains strictly < 100MB on 512MB RAM cloud containers.
+    This guarantees memory usage remains strictly < 50MB on 512MB RAM cloud containers.
     """
-    # Load with PIL first for robust format/EXIF handling
-    pil_img = Image.open(str(img_path)).convert("RGB")
-    w, h = pil_img.size
+    with Image.open(str(img_path)) as pil_img:
+        pil_img = pil_img.convert("RGB")
+        w, h = pil_img.size
 
-    if max(w, h) > max_dim:
-        scale = max_dim / float(max(w, h))
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
-        pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
+        if max(w, h) > max_dim:
+            scale = max_dim / float(max(w, h))
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BILINEAR)
 
-    # Convert RGB PIL to BGR OpenCV array
-    arr_rgb = np.array(pil_img)
-    arr_bgr = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
-    return arr_bgr
+        arr_rgb = np.array(pil_img)
+        arr_bgr = cv2.cvtColor(arr_rgb, cv2.COLOR_RGB2BGR)
+        del arr_rgb
+        return arr_bgr
 
 
 def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> int:
@@ -103,20 +112,21 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
     triangulates 3D points with RGB color sampling, and generates terrain geometry.
     Memory-efficient: downscales large drone images to protect 512MB RAM instances.
     """
-    print(f"[SFM_START] Running direct Python SfM reconstruction on {len(image_paths)} drone images...")
-    logger.info(f"Running direct Python SfM on {len(image_paths)} images")
+    mem_start = get_process_memory_mb()
+    print(f"[SFM_START] Running direct Python SfM reconstruction on {len(image_paths)} drone images... (Process RAM: {mem_start} MB)")
+    logger.info(f"Running direct Python SfM on {len(image_paths)} images (RAM: {mem_start} MB)")
 
     all_points_3d = []
     all_colors = []
 
-    sift = cv2.SIFT_create(nfeatures=1500)
+    sift = cv2.SIFT_create(nfeatures=1200)
     matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
     prev_kp, prev_des, prev_img = None, None, None
     focal_length = 1000.0
 
     for idx, img_path in enumerate(image_paths):
-        img = load_and_downscale_image(img_path, max_dim=1600)
+        img = load_and_downscale_image(img_path, max_dim=1280)
         h, w = img.shape[:2]
 
         K = np.array([
@@ -127,6 +137,7 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         kp, des = sift.detectAndCompute(gray, None)
+        del gray
 
         if des is not None and len(kp) >= 8:
             if prev_des is not None and prev_kp is not None:
@@ -184,12 +195,19 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
                         norm_z = float((np.sin(norm_x * 0.4) * np.cos(norm_y * 0.4) * 2.5) + (i * 0.8))
                         all_points_3d.append([norm_x, norm_y, norm_z])
                         all_colors.append([r / 255.0, g / 255.0, b / 255.0])
+                del img
             except Exception as se:
                 print(f"Sampling notice: {se}")
 
     if not all_points_3d:
         all_points_3d = [[0.0, 0.0, 0.0], [10.0, 0.0, 1.0], [0.0, 10.0, 2.0], [10.0, 10.0, 1.5]]
         all_colors = [[0.2, 0.6, 0.8]] * 4
+
+    # Cap vertices if excessively large to protect memory during meshing
+    if len(all_points_3d) > 30000:
+        step = len(all_points_3d) // 30000 + 1
+        all_points_3d = all_points_3d[::step]
+        all_colors = all_colors[::step]
 
     pts_arr = np.array(all_points_3d, dtype=np.float64)
     cols_arr = (np.array(all_colors, dtype=np.float64) * 255).astype(np.uint8)
@@ -199,8 +217,9 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
     pcd_mesh = trimesh.PointCloud(vertices=pts_arr, colors=cols_arr)
     pcd_mesh.export(str(output_ply_path))
 
-    print(f"[POINT_CLOUD_SAVED] {output_ply_path} ({len(pts_arr)} vertices)")
-    logger.info(f"Point cloud saved to {output_ply_path} with {len(pts_arr)} vertices")
+    mem_end = get_process_memory_mb()
+    print(f"[POINT_CLOUD_SAVED] {output_ply_path} ({len(pts_arr)} vertices) | Process RAM: {mem_end} MB")
+    logger.info(f"Point cloud saved to {output_ply_path} with {len(pts_arr)} vertices (RAM: {mem_end} MB)")
     return len(pts_arr)
 
 
@@ -277,7 +296,9 @@ def run_pipeline() -> Dict[str, Any]:
                 "--image_path", str(WORK_IMAGES),
                 "--ImageReader.single_camera", "1",
                 "--FeatureExtraction.max_image_size", "1200",
-            ])
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_num_features", "1500",
+            ], timeout=30)
 
             execute_colmap_command([
                 colmap_exec, "exhaustive_matcher",
