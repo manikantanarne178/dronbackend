@@ -25,8 +25,8 @@ logger = logging.getLogger("uvicorn.error")
 async def lifespan(app: FastAPI):
     """
     FastAPI Lifespan handler:
-    Initializes database tables and seeds default rule configurations
-    safely on application startup without blocking module imports.
+    Initializes database tables, seeds default rule configurations,
+    and ensures default municipal admin account is configured.
     """
     try:
         logger.info("Initializing database schema...")
@@ -35,13 +35,34 @@ async def lifespan(app: FastAPI):
         try:
             seed_rules(db)
             logger.info("Default rule configurations verified/seeded.")
+            
+            # Seed / sync user Harini
+            try:
+                from app.models.user import User
+                from app.core.security import hash_password
+                user = db.query(User).filter(User.email == "y21ece178@gmail.com").first()
+                if not user:
+                    user = User(
+                        username="harini",
+                        email="y21ece178@gmail.com",
+                        password=hash_password("Harini@12"),
+                    )
+                    db.add(user)
+                    db.commit()
+                    logger.info("Created user account for y21ece178@gmail.com")
+                else:
+                    user.password = hash_password("Harini@12")
+                    db.commit()
+                    logger.info("Synchronized password for y21ece178@gmail.com")
+            except Exception as user_err:
+                logger.warning(f"User account seed notice: {user_err}")
+                db.rollback()
         finally:
             db.close()
         logger.info("Database startup initialization completed successfully.")
     except Exception as e:
         logger.error(f"Startup database initialization warning: {e}")
     yield
-
 
 app = FastAPI(
     title="DroneVision API",
