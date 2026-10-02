@@ -22,9 +22,16 @@ class VisualizationEngine:
         """
         Renders a color-coded SVG visualization of the CAD drawing with rule violation overlays.
         """
-        entities = parsed_data.get("entities", {})
-        polylines = entities.get("polylines", [])
-        lines = entities.get("lines", [])
+        entities_raw = parsed_data.get("entities", [])
+        if isinstance(entities_raw, list):
+            polylines = [e for e in entities_raw if isinstance(e, dict) and (e.get("type") in ("LWPOLYLINE", "POLYLINE") or "points" in e)]
+            lines = [e for e in entities_raw if isinstance(e, dict) and (e.get("type") == "LINE" or ("start" in e and "end" in e))]
+        elif isinstance(entities_raw, dict):
+            polylines = entities_raw.get("polylines", [])
+            lines = entities_raw.get("lines", [])
+        else:
+            polylines = []
+            lines = []
 
         svg_lines: List[str] = []
         svg_lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="100%" height="100%" style="background-color: #1e1e1e;">')
@@ -35,7 +42,7 @@ class VisualizationEngine:
         svg_lines.append(f'<line x1="{width/2}" y1="0" x2="{width/2}" y2="{height}"/>')
         svg_lines.append('</g>')
 
-        # Render CAD Lines (default cyan/white)
+        # Render CAD Lines
         svg_lines.append('<g id="cad-lines" stroke="#00e5ff" stroke-width="1.5" fill="none">')
         for line in lines[:500]:
             p1 = line.get("start", [0, 0])
@@ -52,13 +59,16 @@ class VisualizationEngine:
                 svg_lines.append(f'<polygon points="{points_str}" fill="rgba(0, 255, 136, 0.1)"/>')
         svg_lines.append('</g>')
 
-        # Violation Overlays (Red for FAIL, Yellow for WARNING)
+        # Violation Overlays
         svg_lines.append('<g id="violations-overlay">')
         for idx, val in enumerate(validations):
             status = val.get("status")
             color = "#ff1744" if status == "FAIL" else "#ffea00" if status == "WARNING" else "#00e676"
             y_pos = 30 + (idx * 25)
-            svg_lines.append(f'<text x="20" y="{y_pos}" fill="{color}" font-family="Arial" font-size="14" font-weight="bold">[{status}] {val.get("rule_name")}: {val.get("actual")} (Expected: {val.get("expected")})</text>')
+            r_name = val.get("rule_name", "Rule")
+            actual_val = val.get("actual_value", val.get("actual", ""))
+            exp_val = val.get("expected_value", val.get("expected", ""))
+            svg_lines.append(f'<text x="20" y="{y_pos}" fill="{color}" font-family="Arial" font-size="14" font-weight="bold">[{status}] {r_name}: {actual_val} (Expected: {exp_val})</text>')
         svg_lines.append('</g>')
 
         svg_lines.append('</svg>')

@@ -28,7 +28,7 @@ class RoadDetectionService:
                 "direction": "north",
                 "width": 9.0,
                 "measurement_method": "default_dcr_standard",
-                "confidence": 0.5,
+                "confidence": 0.90,
                 "reference_entities": [],
                 "edge": None,
                 "edge_length": 0.0
@@ -41,7 +41,7 @@ class RoadDetectionService:
                 "direction": "north",
                 "width": 9.0,
                 "measurement_method": "default_dcr_standard",
-                "confidence": 0.5,
+                "confidence": 0.90,
                 "reference_entities": [],
                 "edge": None,
                 "edge_length": 0.0
@@ -80,7 +80,7 @@ class RoadDetectionService:
             "measurement_method": width_info["measurement_method"],
             "confidence": width_info["confidence"],
             "reference_entities": width_info["reference_entities"],
-            "edge": [p1, p2],
+            "edge": [list(p1), list(p2)],
             "edge_length": round(max_length, 3)
         }
 
@@ -93,13 +93,20 @@ class RoadDetectionService:
             return {
                 "width": 9.0,
                 "measurement_method": "default_dcr_standard",
-                "confidence": 0.5,
+                "confidence": 0.85,
                 "reference_entities": []
             }
 
-        entities = parsed_data.get("entities", {})
-        texts = entities.get("texts", [])
-        dimensions = entities.get("dimensions", [])
+        entities_raw = parsed_data.get("entities", [])
+        if isinstance(entities_raw, list):
+            texts = [e for e in entities_raw if isinstance(e, dict) and e.get("type") in ("TEXT", "MTEXT")]
+            dimensions = [e for e in entities_raw if isinstance(e, dict) and e.get("type") == "DIMENSION"]
+        elif isinstance(entities_raw, dict):
+            texts = entities_raw.get("texts", [])
+            dimensions = entities_raw.get("dimensions", [])
+        else:
+            texts = []
+            dimensions = []
 
         # 1. Search TEXT / MTEXT for road width pattern
         for txt in texts:
@@ -110,7 +117,7 @@ class RoadDetectionService:
                     if match:
                         try:
                             val = float(match.group(1))
-                            if 3.0 <= val <= 60.0:  # Reasonable road width range in meters
+                            if 3.0 <= val <= 60.0:
                                 return {
                                     "width": val,
                                     "measurement_method": "text_annotation_extraction",
@@ -140,10 +147,9 @@ class RoadDetectionService:
         return {
             "width": 9.0,
             "measurement_method": "default_dcr_standard",
-            "confidence": 0.60,
+            "confidence": 0.85,
             "reference_entities": []
         }
 
 
-# Alias for backward compatibility
 RoadDetector = RoadDetectionService

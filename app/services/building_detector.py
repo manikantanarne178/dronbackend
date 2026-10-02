@@ -1,122 +1,87 @@
+import re
+from typing import List, Dict, Any, Optional
+from shapely.geometry import Polygon
+
+_BLDG_LAYER_RE = re.compile(
+    r"\b(building|structure|footprint|proposed|proposed_building|bldg|ground_floor|tower|block|superstructure)\b",
+    re.IGNORECASE,
+)
+
+
 class BuildingDetector:
 
     @staticmethod
     def normalize_point(point):
-        """
-        Converts different point formats into (x, y).
-
-        Supported:
-        (x, y)
-        (x, y, z)
-        [x, y]
-        [x, y, z]
-        {"x": ..., "y": ...}
-        """
-
         if isinstance(point, dict):
             return float(point["x"]), float(point["y"])
-
-        if isinstance(point, (list, tuple)):
-            if len(point) >= 2:
-                return float(point[0]), float(point[1])
-
+        if isinstance(point, (list, tuple)) and len(point) >= 2:
+            return float(point[0]), float(point[1])
         raise ValueError(f"Invalid point format: {point}")
 
     @staticmethod
-    def point_in_polygon(point, polygon):
-
-        x, y = BuildingDetector.normalize_point(point)
-
-        polygon = [
-            BuildingDetector.normalize_point(p)
-            for p in polygon
-        ]
-
-        inside = False
-        j = len(polygon) - 1
-
-        for i in range(len(polygon)):
-
-            xi, yi = polygon[i]
-            xj, yj = polygon[j]
-
-            if (yi > y) != (yj > y):
-
-                intersect = (
-                    x <
-                    ((xj - xi) * (y - yi)) /
-                    ((yj - yi) if (yj - yi) != 0 else 1e-9)
-                    + xi
-                )
-
-                if intersect:
-                    inside = not inside
-
-            j = i
-
-        return inside
-
-    @staticmethod
-    def detect(polygons, plot):
-
-        if plot is None:
+    def detect(polygons: List[Dict[str, Any]], plot: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        if not polygons:
             return None
 
-        plot_points = [
-            BuildingDetector.normalize_point(p)
-            for p in plot["points"]
-        ]
+        # 1. Layer-specific matching
+        for p in polygons:
+            layer = str(p.get("layer", "")).strip()
+            if _BLDG_LAYER_RE.search(layer):
+                return {
+                    "points": p["points"],
+                    "area": float(p["area"]),
+                    "centroid": p["centroid"],
+                    "layer": layer,
+                    "confidence": 0.98,
+                }
 
-        plot_area = plot["area"]
+        # 2. Geometric containment within plot
+        plot_area = float(plot.get("area", 0.0)) if plot else float("inf")
+        plot_poly = None
+        if plot and "points" in plot and len(plot["points"]) >= 3:
+            try:
+                plot_poly = Polygon(plot["points"])
+            except Exception:
+                pass
 
         candidates = []
-
-        for polygon in polygons:
-
-            if polygon["area"] >= plot_area:
+        for p in polygons:
+            p_area = float(p.get("area", 0.0))
+            if p_area >= plot_area or p_area <= 1e-4:
                 continue
 
-            inside = True
-
-            polygon_points = [
-                BuildingDetector.normalize_point(p)
-                for p in polygon["points"]
-            ]
-
-            # Ignore duplicated closing point if present
-            if len(polygon_points) > 1 and polygon_points[0] == polygon_points[-1]:
-                check_points = polygon_points[:-1]
+            # Check if inside plot
+            if plot_poly:
+                try:
+                    c_poly = Polygon(p["points"])
+                    if plot_poly.contains(c_poly) or plot_poly.intersects(c_poly):
+                        candidates.append(p)
+                except Exception:
+                    candidates.append(p)
             else:
-                check_points = polygon_points
+                candidates.append(p)
 
-            for point in check_points:
+        if candidates:
+            candidates.sort(key=lambda x: float(x.get("area", 0.0)), reverse=True)
+            chosen = candidates[0]
+            return {
+                "points": chosen["points"],
+                "area": float(chosen["area"]),
+                "centroid": chosen["centroid"],
+                "layer": chosen.get("layer", "INNER_POLYGON"),
+                "confidence": 0.90,
+            }
 
-                if not BuildingDetector.point_in_polygon(
-                    point,
-                    plot_points
-                ):
-                    inside = False
-                    break
+        # 3. If only 2 polygons exist, the second largest is building
+        if len(polygons) >= 2:
+            sorted_polys = sorted(polygons, key=lambda x: float(x.get("area", 0.0)), reverse=True)
+            chosen = sorted_polys[1]
+            return {
+                "points": chosen["points"],
+                "area": float(chosen["area"]),
+                "centroid": chosen["centroid"],
+                "layer": chosen.get("layer", "SECOND_LARGEST"),
+                "confidence": 0.85,
+            }
 
-            if inside:
-                candidates.append({
-                    "points": polygon_points,
-                    "area": polygon["area"],
-                    "centroid": polygon["centroid"]
-                })
-
-        if not candidates:
-            return None
-
-        candidates.sort(
-            key=lambda x: x["area"],
-            reverse=True
-        )
-
-        building = candidates[0]
-
-        return {
-            "points": building["points"],
-            "area": building["area"],
-            "centroid": building["centroid"]
-        }
+        return None

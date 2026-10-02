@@ -12,7 +12,7 @@ class HeightEngine:
     Production height calculation engine for AutoDCR.
     """
 
-    DEFAULT_FLOOR_HEIGHT = 3.0  # meters
+    DEFAULT_FLOOR_HEIGHT = 3.2  # meters
     DEFAULT_PLINTH_HEIGHT = 0.6  # meters
     DEFAULT_PARAPET_HEIGHT = 1.2  # meters
     DEFAULT_BASEMENT_DEPTH = 3.3  # meters
@@ -22,9 +22,8 @@ class HeightEngine:
         """
         Calculates all building height metrics.
         """
-        metadata = parsed_data.get("metadata", {})
+        metadata = parsed_data.get("metadata", {}) if isinstance(parsed_data, dict) else {}
         
-        # Look for height values in metadata or calculate estimates
         plinth_height = float(metadata.get("plinth_height", HeightEngine.DEFAULT_PLINTH_HEIGHT))
         floor_height = float(metadata.get("floor_height", HeightEngine.DEFAULT_FLOOR_HEIGHT))
         parapet_height = float(metadata.get("parapet_height", HeightEngine.DEFAULT_PARAPET_HEIGHT))
@@ -32,15 +31,18 @@ class HeightEngine:
 
         num_floors = max(1, int(metadata.get("floor_count", floor_count)))
         
-        building_height = plinth_height + (num_floors * floor_height) + parapet_height
-        terrace_height = plinth_height + (num_floors * floor_height)
+        building_height = round(plinth_height + (num_floors * floor_height) + parapet_height, 2)
+        terrace_height = round(plinth_height + (num_floors * floor_height), 2)
 
         return {
             "building_height": building_height,
+            "total_height": building_height,
             "floor_height": floor_height,
             "plinth_height": plinth_height,
+            "stilt_height": 2.4,
             "parapet_height": parapet_height,
             "terrace_height": terrace_height,
             "basement_depth": basement_depth,
             "number_of_floors": num_floors,
+            "floor_count": num_floors,
         }
