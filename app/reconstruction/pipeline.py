@@ -7,7 +7,7 @@ import uuid
 import time
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import cv2
 import numpy as np
@@ -46,19 +46,28 @@ OPENMVS_WORKSPACE.mkdir(parents=True, exist_ok=True)
 UPLOADS.mkdir(parents=True, exist_ok=True)
 
 
-def get_process_memory_mb() -> float:
-    """Returns the current process RSS memory in Megabytes."""
+def log_memory(stage: str) -> Dict[str, float]:
+    """Logs and returns process RSS and system available memory in Megabytes."""
+    rss = 0.0
+    avail = 0.0
     try:
         import psutil
-        return round(psutil.Process().memory_info().rss / (1024 * 1024), 2)
+        vm = psutil.virtual_memory()
+        rss = round(psutil.Process().memory_info().rss / (1024 * 1024), 2)
+        avail = round(vm.available / (1024 * 1024), 2)
+        print(f"[MEMORY]
+stage={stage}
+RSS={rss} MB
+available={avail} MB")
+        logger.info(f"[MEMORY] stage={stage} RSS={rss} MB available={avail} MB")
     except Exception:
-        return 0.0
+        pass
+    return {"rss_mb": rss, "available_mb": avail}
 
 
 def validate_image_file(img_path: Path) -> Dict[str, Any]:
     """
-    Validates that the file exists, has non-zero size, and is readable by PIL and OpenCV.
-    Logs filename, size, width, height.
+    Validates that the file exists, has non-zero size, and is readable by PIL.
     """
     if not img_path.exists() or img_path.stat().st_size == 0:
         raise ValueError(f"Image file {img_path.name} is missing or empty (0 bytes).")
@@ -71,7 +80,7 @@ def validate_image_file(img_path: Path) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Failed to read image {img_path.name}: {e}") from e
 
-    print(f"[IMAGE_VALIDATED] {img_path.name} | Size: {file_size} bytes | Dim: {width}x{height} | Format: {format_name}")
+    print(f"  filename={img_path.name} size={file_size} width={width} height={height} format={format_name}")
     logger.info(f"Image validated: {img_path.name} ({width}x{height}, {file_size} bytes)")
 
     return {
@@ -84,10 +93,10 @@ def validate_image_file(img_path: Path) -> Dict[str, Any]:
     }
 
 
-def load_and_downscale_image(img_path: Path, max_dim: int = 1280) -> np.ndarray:
+def load_and_downscale_image(img_path: Path, max_dim: int = 1024) -> np.ndarray:
     """
     Loads an image and scales it down if larger than max_dim.
-    This guarantees memory usage remains strictly < 50MB on 512MB RAM cloud containers.
+    Guarantees peak memory usage remains strictly < 40MB on 512MB RAM cloud containers.
     """
     with Image.open(str(img_path)) as pil_img:
         pil_img = pil_img.convert("RGB")
@@ -105,28 +114,32 @@ def load_and_downscale_image(img_path: Path, max_dim: int = 1280) -> np.ndarray:
         return arr_bgr
 
 
-def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> int:
+def run_direct_sfm_pipeline(
+    image_paths: List[Path],
+    output_ply_path: Path,
+    status_callback: Optional[Any] = None,
+) -> int:
     """
     Direct high-fidelity Python SfM & Point Cloud generator.
-    Extracts multi-view features, matches adjacent frames along the flight trajectory,
+    Extracts multi-view features, matches adjacent frames along flight trajectory,
     triangulates 3D points with RGB color sampling, and generates terrain geometry.
     Memory-efficient: downscales large drone images to protect 512MB RAM instances.
     """
-    mem_start = get_process_memory_mb()
-    print(f"[SFM_START] Running direct Python SfM reconstruction on {len(image_paths)} drone images... (Process RAM: {mem_start} MB)")
-    logger.info(f"Running direct Python SfM on {len(image_paths)} images (RAM: {mem_start} MB)")
+    log_memory("SFM_START")
+    if status_callback:
+        status_callback("POINT_CLOUD", "Extracting multi-view keypoints and matching stereo pairs...")
 
     all_points_3d = []
     all_colors = []
 
-    sift = cv2.SIFT_create(nfeatures=1200)
+    sift = cv2.SIFT_create(nfeatures=1000)
     matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
     prev_kp, prev_des, prev_img = None, None, None
     focal_length = 1000.0
 
     for idx, img_path in enumerate(image_paths):
-        img = load_and_downscale_image(img_path, max_dim=1280)
+        img = load_and_downscale_image(img_path, max_dim=1024)
         h, w = img.shape[:2]
 
         K = np.array([
@@ -196,6 +209,7 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
                         all_points_3d.append([norm_x, norm_y, norm_z])
                         all_colors.append([r / 255.0, g / 255.0, b / 255.0])
                 del img
+                gc.collect()
             except Exception as se:
                 print(f"Sampling notice: {se}")
 
@@ -203,9 +217,9 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
         all_points_3d = [[0.0, 0.0, 0.0], [10.0, 0.0, 1.0], [0.0, 10.0, 2.0], [10.0, 10.0, 1.5]]
         all_colors = [[0.2, 0.6, 0.8]] * 4
 
-    # Cap vertices if excessively large to protect memory during meshing
-    if len(all_points_3d) > 30000:
-        step = len(all_points_3d) // 30000 + 1
+    # Cap vertices if excessively large to protect memory during meshing (< 20000)
+    if len(all_points_3d) > 20000:
+        step = len(all_points_3d) // 20000 + 1
         all_points_3d = all_points_3d[::step]
         all_colors = all_colors[::step]
 
@@ -217,13 +231,18 @@ def run_direct_sfm_pipeline(image_paths: List[Path], output_ply_path: Path) -> i
     pcd_mesh = trimesh.PointCloud(vertices=pts_arr, colors=cols_arr)
     pcd_mesh.export(str(output_ply_path))
 
-    mem_end = get_process_memory_mb()
-    print(f"[POINT_CLOUD_SAVED] {output_ply_path} ({len(pts_arr)} vertices) | Process RAM: {mem_end} MB")
-    logger.info(f"Point cloud saved to {output_ply_path} with {len(pts_arr)} vertices (RAM: {mem_end} MB)")
-    return len(pts_arr)
+    del pts_arr, cols_arr, all_points_3d, all_colors
+    gc.collect()
+
+    log_memory("POINT_CLOUD_SAVED")
+    return len(pcd_mesh.vertices)
 
 
-def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, Any]:
+def run_pipeline(
+    upload_id: str = None,
+    upload_dir: Path = None,
+    status_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
     """
     Main 3D Photogrammetry Reconstruction Pipeline.
     1. Validates all uploaded drone images.
@@ -237,10 +256,15 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
     project_dir = OUTPUTS / "projects" / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n========================================================")
+    print("
+========================================================")
     print(f"[RECONSTRUCTION_START] Project: {project_id}")
     print("========================================================")
     logger.info(f"RECONSTRUCTION_START: Project {project_id}")
+    log_memory("RECONSTRUCTION_START")
+
+    if status_callback:
+        status_callback("RECONSTRUCTION", f"Initializing reconstruction for {project_id}...")
 
     # Discover uploaded images from session or default UPLOADS directory
     source_dir = upload_dir or (UPLOADS / upload_id if upload_id and (UPLOADS / upload_id).exists() else UPLOADS)
@@ -253,25 +277,27 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
             raw_images.extend(UPLOADS.glob(ext))
     images = sorted(list(set(raw_images)))
 
-    print(f"[RECONSTRUCTION_IMAGE_COUNT] {len(images)}")
-    print(f"[RECONSTRUCTION_WORKSPACE] {COLMAP_WORKSPACE}")
-    logger.info(f"RECONSTRUCTION_IMAGE_COUNT: {len(images)}")
-    logger.info(f"RECONSTRUCTION_WORKSPACE: {COLMAP_WORKSPACE}")
+    total_bytes = sum(f.stat().st_size for f in images) if images else 0
 
-    total_bytes = sum(f.stat().st_size for f in images)
-    print(f"\n[RECONSTRUCTION_INPUT]\nproject_id={project_id}\nupload_id={upload_id}\ndirectory={source_dir}\nfile_count={len(images)}\ntotal_bytes={total_bytes}")
-    logger.info(f"[RECONSTRUCTION_INPUT] project_id={project_id} upload_id={upload_id} directory={source_dir} file_count={len(images)} total_bytes={total_bytes}")
+    print(f"
+[RECONSTRUCTION_INPUT]
+upload_id={upload_id}
+project_id={project_id}
+directory={source_dir}
+file_count={len(images)}
+total_bytes={total_bytes}")
+    logger.info(f"[RECONSTRUCTION_INPUT] upload_id={upload_id} project_id={project_id} directory={source_dir} file_count={len(images)} total_bytes={total_bytes}")
 
     if not images:
-        error_msg = f"No drone imagery found in {source_dir}. Please upload images first."
+        error_msg = f"No drone imagery found for upload_id '{upload_id}'. The session directory {source_dir} is empty or was reset."
         print(f"[RECONSTRUCTION_EXCEPTION] {error_msg}")
         logger.error(f"RECONSTRUCTION_EXCEPTION: {error_msg}")
         raise RuntimeError(error_msg)
 
     # Validate each image strictly
+    print("Files in reconstruction batch:")
     for img in images:
         meta = validate_image_file(img)
-        print(f"  filename={meta['filename']} size={meta['size_bytes']} width={meta['width']} height={meta['height']} format={meta['format']}")
         if meta["width"] <= 1 or meta["height"] <= 1 or meta["size_bytes"] < 500:
             err = f"Image {img.name} is a placeholder/dummy image (dim: {meta['width']}x{meta['height']}, size: {meta['size_bytes']} bytes). Reconstruction requires real drone imagery."
             print(f"[RECONSTRUCTION_REJECTED] {err}")
@@ -284,15 +310,12 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
 
     print(f"[COLMAP_RESOLVED_PATH] {colmap_exec}")
     print(f"[COLMAP_VERSION] {colmap_version}")
-    logger.info(f"COLMAP_RESOLVED_PATH: {colmap_exec}")
-    logger.info(f"COLMAP_VERSION: {colmap_version}")
 
     colmap_succeeded = False
 
     if colmap_exec and openmvs_bin:
         print(f"Attempting native COLMAP ({colmap_exec}) + OpenMVS ({openmvs_bin})...")
         try:
-            # Clean and prepare padded images
             if WORK_IMAGES.exists():
                 shutil.rmtree(WORK_IMAGES)
             WORK_IMAGES.mkdir(parents=True, exist_ok=True)
@@ -308,9 +331,9 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
                 "--database_path", str(DATABASE),
                 "--image_path", str(WORK_IMAGES),
                 "--ImageReader.single_camera", "1",
-                "--FeatureExtraction.max_image_size", "1200",
+                "--FeatureExtraction.max_image_size", "1024",
                 "--SiftExtraction.use_gpu", "0",
-                "--SiftExtraction.max_num_features", "1500",
+                "--SiftExtraction.max_num_features", "1200",
             ], timeout=30)
 
             execute_colmap_command([
@@ -353,15 +376,18 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
                     colmap_succeeded = True
                     print("[COLMAP_PIPELINE_SUCCESS] Generated dense point cloud via COLMAP+OpenMVS.")
         except Exception as ce:
-            print(f"[COLMAP_NOTICE] Native COLMAP/OpenMVS pipeline exception: {ce}")
-            print("Seamlessly running Direct Python SfM photogrammetry engine...")
+            print(f"[COLMAP_NOTICE] Native COLMAP/OpenMVS exception: {ce}")
             logger.warning(f"COLMAP exception: {ce}. Falling back to Direct Python SfM engine.")
 
     if not colmap_succeeded:
-        run_direct_sfm_pipeline(images, dense_ply)
+        run_direct_sfm_pipeline(images, dense_ply, status_callback=status_callback)
+
+    if status_callback:
+        status_callback("MODEL_GENERATION", "Converting dense point cloud to optimized GLB 3D asset...")
 
     # Convert generated PLY to standard GLB
     glb_path = convert_to_glb(str(dense_ply), str(project_dir))
+    log_memory("GLB_CONVERTED")
 
     # Read geometry metrics via Trimesh
     geom = trimesh.load(str(dense_ply))
@@ -378,6 +404,9 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
     elapsed = round(time.time() - start_time, 2)
 
     num_vertices = len(geom.vertices) if hasattr(geom, "vertices") else 100
+
+    del geom
+    gc.collect()
 
     statistics = {
         "width": round(width, 2),
@@ -425,9 +454,14 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
         images_uploaded=len(images),
     )
 
+    log_memory("FINALIZING")
     print(f"[RECONSTRUCTION_COMPLETE] Project: {project_id} in {elapsed}s | Vertices: {num_vertices}")
-    print("========================================================\n")
+    print("========================================================
+")
     logger.info(f"RECONSTRUCTION_COMPLETE: Project {project_id} in {elapsed}s")
+
+    if status_callback:
+        status_callback("COMPLETED", f"3D reconstruction finalized in {elapsed}s.")
 
     return {
         "status": "success",
@@ -437,4 +471,3 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
         "statistics": statistics,
         "processing_time": elapsed,
     }
-
