@@ -258,15 +258,24 @@ def run_pipeline(upload_id: str = None, upload_dir: Path = None) -> Dict[str, An
     logger.info(f"RECONSTRUCTION_IMAGE_COUNT: {len(images)}")
     logger.info(f"RECONSTRUCTION_WORKSPACE: {COLMAP_WORKSPACE}")
 
+    total_bytes = sum(f.stat().st_size for f in images)
+    print(f"\n[RECONSTRUCTION_INPUT]\nproject_id={project_id}\nupload_id={upload_id}\ndirectory={source_dir}\nfile_count={len(images)}\ntotal_bytes={total_bytes}")
+    logger.info(f"[RECONSTRUCTION_INPUT] project_id={project_id} upload_id={upload_id} directory={source_dir} file_count={len(images)} total_bytes={total_bytes}")
+
     if not images:
-        error_msg = f"No drone imagery found in {UPLOADS}. Please upload images first."
+        error_msg = f"No drone imagery found in {source_dir}. Please upload images first."
         print(f"[RECONSTRUCTION_EXCEPTION] {error_msg}")
         logger.error(f"RECONSTRUCTION_EXCEPTION: {error_msg}")
         raise RuntimeError(error_msg)
 
-    # Validate each image
+    # Validate each image strictly
     for img in images:
-        validate_image_file(img)
+        meta = validate_image_file(img)
+        print(f"  filename={meta['filename']} size={meta['size_bytes']} width={meta['width']} height={meta['height']} format={meta['format']}")
+        if meta["width"] <= 1 or meta["height"] <= 1 or meta["size_bytes"] < 500:
+            err = f"Image {img.name} is a placeholder/dummy image (dim: {meta['width']}x{meta['height']}, size: {meta['size_bytes']} bytes). Reconstruction requires real drone imagery."
+            print(f"[RECONSTRUCTION_REJECTED] {err}")
+            raise ValueError(err)
 
     dense_ply = OPENMVS_WORKSPACE / "scene_dense.ply"
     colmap_exec = resolve_colmap_executable()
