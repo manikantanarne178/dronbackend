@@ -55,10 +55,7 @@ def log_memory(stage: str) -> Dict[str, float]:
         vm = psutil.virtual_memory()
         rss = round(psutil.Process().memory_info().rss / (1024 * 1024), 2)
         avail = round(vm.available / (1024 * 1024), 2)
-        print(f"[MEMORY]
-stage={stage}
-RSS={rss} MB
-available={avail} MB")
+        print(f"[MEMORY] stage={stage} RSS={rss} MB available={avail} MB")
         logger.info(f"[MEMORY] stage={stage} RSS={rss} MB available={avail} MB")
     except Exception:
         pass
@@ -256,8 +253,7 @@ def run_pipeline(
     project_dir = OUTPUTS / "projects" / project_id
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    print("
-========================================================")
+    print("========================================================")
     print(f"[RECONSTRUCTION_START] Project: {project_id}")
     print("========================================================")
     logger.info(f"RECONSTRUCTION_START: Project {project_id}")
@@ -279,13 +275,7 @@ def run_pipeline(
 
     total_bytes = sum(f.stat().st_size for f in images) if images else 0
 
-    print(f"
-[RECONSTRUCTION_INPUT]
-upload_id={upload_id}
-project_id={project_id}
-directory={source_dir}
-file_count={len(images)}
-total_bytes={total_bytes}")
+    print(f"[RECONSTRUCTION_INPUT] upload_id={upload_id} project_id={project_id} directory={source_dir} file_count={len(images)} total_bytes={total_bytes}")
     logger.info(f"[RECONSTRUCTION_INPUT] upload_id={upload_id} project_id={project_id} directory={source_dir} file_count={len(images)} total_bytes={total_bytes}")
 
     if not images:
@@ -456,8 +446,7 @@ total_bytes={total_bytes}")
 
     log_memory("FINALIZING")
     print(f"[RECONSTRUCTION_COMPLETE] Project: {project_id} in {elapsed}s | Vertices: {num_vertices}")
-    print("========================================================
-")
+    print("========================================================")
     logger.info(f"RECONSTRUCTION_COMPLETE: Project {project_id} in {elapsed}s")
 
     if status_callback:
