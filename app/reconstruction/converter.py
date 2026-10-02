@@ -1,142 +1,62 @@
-import subprocess
+import os
 from pathlib import Path
+import trimesh
+import open3d as o3d
+import numpy as np
 
-# ==============================
-# Paths
-# ==============================
-
-SCRIPTS = Path("app/scripts")
-SCRIPTS.mkdir(parents=True, exist_ok=True)
-
-BLENDER = Path(
-    r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
-)
-
-
-def convert_to_glb(mesh_path, project_dir):
+def convert_to_glb(mesh_path: str, project_dir: str) -> str:
     """
-    Convert a mesh (.ply/.obj) into GLB using Blender.
-
-    Args:
-        mesh_path: Input mesh (.ply/.obj)
-        project_dir: Folder where model.glb should be saved
-
-    Returns:
-        Full path to generated GLB.
+    Convert a 3D mesh or point cloud (.ply / .obj) to standard .glb binary format.
+    Uses native Python trimesh & open3d (cross-platform, zero external blender dependencies).
     """
+    input_file = Path(mesh_path)
+    if not input_file.exists():
+        raise FileNotFoundError(f"3D Model input file not found: {mesh_path}")
 
-    mesh = Path(mesh_path)
+    out_dir = Path(project_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    glb_path = out_dir / "model.glb"
 
-    if not mesh.exists():
-        raise FileNotFoundError(f"Mesh not found:\n{mesh}")
+    print(f"Converting 3D asset {input_file.name} to GLB at {glb_path}...")
 
-    if not BLENDER.exists():
-        raise FileNotFoundError(f"Blender not found:\n{BLENDER}")
+    try:
+        # Load mesh via trimesh
+        loaded = trimesh.load(str(input_file))
+        if isinstance(loaded, trimesh.Scene):
+            # Scene with multiple geometries
+            loaded.export(str(glb_path), file_type="glb")
+        elif isinstance(loaded, trimesh.Trimesh):
+            loaded.export(str(glb_path), file_type="glb")
+        elif isinstance(loaded, trimesh.PointCloud):
+            # Convert Point Cloud to small spheres or direct export
+            scene = trimesh.Scene(geometry=[loaded])
+            scene.export(str(glb_path), file_type="glb")
+        else:
+            # Fallback open3d
+            pcd = o3d.io.read_point_cloud(str(input_file))
+            if len(pcd.points) > 0:
+                # Estimate normals and reconstruct surface via Poisson or Ball Pivoting
+                pcd.estimate_normals()
+                radii = [0.005, 0.01, 0.02, 0.04]
+                mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+                    pcd, o3d.utility.DoubleVector(radii)
+                )
+                temp_obj = out_dir / "temp_mesh.obj"
+                o3d.io.write_triangle_mesh(str(temp_obj), mesh)
+                tm = trimesh.load(str(temp_obj))
+                tm.export(str(glb_path), file_type="glb")
+                temp_obj.unlink(missing_ok=True)
+            else:
+                loaded.export(str(glb_path), file_type="glb")
 
-    project_dir = Path(project_dir)
-    project_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"Trimesh export notice: {e}, falling back to direct GLTF scene packaging...")
+        # Direct raw scene packaging fallback
+        mesh = trimesh.load(str(input_file), force="mesh")
+        mesh.export(str(glb_path), file_type="glb")
 
-    glb = project_dir / "model.glb"
+    if glb_path.exists():
+        print(f"GLB model generated successfully: {glb_path.stat().st_size} bytes")
+        return str(glb_path)
 
-    script = SCRIPTS / "blender_convert.py"
-
-    script.write_text(
-f'''
-import bpy
-from pathlib import Path
-
-print("=" * 60)
-print("BLENDER STARTED")
-print("Version:", bpy.app.version_string)
-
-# Clean scene
-bpy.ops.wm.read_factory_settings(use_empty=True)
-
-mesh = Path(r"{mesh}")
-
-print("Mesh:", mesh)
-
-if not mesh.exists():
-    raise Exception(f"Mesh not found: {{mesh}}")
-
-suffix = mesh.suffix.lower()
-
-print("Extension:", suffix)
-
-if suffix == ".ply":
-    bpy.ops.wm.ply_import(filepath=str(mesh))
-
-elif suffix == ".obj":
-    bpy.ops.wm.obj_import(filepath=str(mesh))
-
-else:
-    raise Exception(f"Unsupported mesh format: {{suffix}}")
-
-print("Mesh imported successfully.")
-
-bpy.ops.object.select_all(action="SELECT")
-
-output = r"{glb}"
-
-print("Exporting to:", output)
-
-bpy.ops.export_scene.gltf(
-    filepath=output,
-    export_format="GLB",
-    export_apply=True
-)
-
-print("GLB exported successfully.")
-print("=" * 60)
-'''
-    )
-
-    print("\nLaunching Blender...\n")
-
-    result = subprocess.run(
-        [
-            str(BLENDER),
-            "--background",
-            "--python",
-            str(script),
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    print("=" * 80)
-    print("BLENDER STDOUT")
-    print("=" * 80)
-    print(result.stdout)
-
-    print("=" * 80)
-    print("BLENDER STDERR")
-    print("=" * 80)
-    print(result.stderr)
-
-    print("=" * 80)
-    print("RETURN CODE:", result.returncode)
-    print("=" * 80)
-
-    if glb.exists():
-        print("\n==========================================")
-        print("GLB created successfully")
-        print(glb)
-        print("==========================================\n")
-
-        return str(glb)
-
-    raise RuntimeError(
-        f"""
-Blender did not generate the GLB.
-
-Return Code:
-{result.returncode}
-
-STDOUT:
-{result.stdout}
-
-STDERR:
-{result.stderr}
-"""
-    )
+    raise RuntimeError(f"Failed to generate GLB from {mesh_path}")

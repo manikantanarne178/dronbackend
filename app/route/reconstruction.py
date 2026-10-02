@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
+from app.core.colmap import get_colmap_diagnostics
 from app.models.project import Project
 from app.models.user import User
 from app.reconstruction.pipeline import run_pipeline
@@ -14,6 +15,17 @@ router = APIRouter(
     prefix="/api/reconstruction",
     tags=["Reconstruction"],
 )
+
+
+@router.get("/diagnostics")
+async def get_diagnostics():
+    """
+    Diagnostic endpoint to inspect photogrammetry engine and COLMAP resolution.
+    """
+    return {
+        "status": "online",
+        "engine": get_colmap_diagnostics(),
+    }
 
 
 @router.post("/generate")
@@ -38,7 +50,7 @@ async def generate_model(
             "status": "success",
             "message": "3D reconstruction completed successfully.",
             "project_id": result["project_id"],
-            "model_url": f"/api/reconstruction/model/{result['project_id']}",
+            "model_url": f"/api/projects/{result['project_id']}/model",
             "report_url": f"/api/report/download/{result['project_id']}",
             "statistics": result.get("statistics", {}),
         }
@@ -75,9 +87,7 @@ async def get_model(
             detail="Project not found.",
         )
 
-    model_path = Path(
-        "app/outputs/projects"
-    ) / project_id / "model.glb"
+    model_path = Path("app/outputs/projects") / project_id / "model.glb"
 
     if not model_path.exists():
         raise HTTPException(
