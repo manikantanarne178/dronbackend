@@ -91,6 +91,21 @@ app.add_middleware(
 )
 
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"[GLOBAL_EXCEPTION] {request.method} {request.url}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": f"Internal Server Error: {str(exc)}",
+            "path": str(request.url.path),
+            "method": request.method,
+        },
+    )
+
 # ============================
 # Routers
 # ============================
