@@ -10,12 +10,18 @@ load_dotenv(override=False)
 def normalize_database_url(url: Optional[str], default_sqlite_path: Path) -> str:
     """
     Safely normalizes database URLs for SQLAlchemy and psycopg/psycopg2.
-    Falls back to SQLite if DATABASE_URL is not configured in environment.
+    Falls back to SQLite if DATABASE_URL is not configured or points to unreachable localhost on Render/Cloud.
     """
     if not url or not str(url).strip():
         return f"sqlite:///{default_sqlite_path}"
 
     url = str(url).strip()
+
+    # Guard against localhost/127.0.0.1 when running on cloud hosts (e.g. Render) where no local postgres exists
+    is_cloud_env = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID") or os.getenv("PORT"))
+    is_localhost = any(h in url.lower() for h in ["localhost", "127.0.0.1"])
+    if is_cloud_env and is_localhost:
+        return f"sqlite:///{default_sqlite_path}"
 
     has_psycopg3 = False
     try:
