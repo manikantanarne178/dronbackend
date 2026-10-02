@@ -1,8 +1,11 @@
-﻿from fastapi import FastAPI
+import logging
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 
-from app.core.database import create_tables
+from app.core.database import create_tables, SessionLocal
+from app.core.seed_rules import seed_rules
 from app.route.drawing import router as drawing_router
 from app.route.home import router as home_router
 from app.route.upload import router as upload_router
@@ -13,21 +16,39 @@ from app.controller.auth import router as auth_router
 from app.controller.projects import router as projects_router
 from app.controller.report import router as report_router
 from app.route.gps import router as gps_router
-from app.core.database import SessionLocal
-from app.core.seed_rules import seed_rules
 from app.route import report
+
+logger = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI Lifespan handler:
+    Initializes database tables and seeds default rule configurations
+    safely on application startup without blocking module imports.
+    """
+    try:
+        logger.info("Initializing database schema...")
+        create_tables()
+        db = SessionLocal()
+        try:
+            seed_rules(db)
+            logger.info("Default rule configurations verified/seeded.")
+        finally:
+            db.close()
+        logger.info("Database startup initialization completed successfully.")
+    except Exception as e:
+        logger.error(f"Startup database initialization warning: {e}")
+    yield
+
 
 app = FastAPI(
     title="DroneVision API",
     version="1.0.0",
     description="Backend API for DroneVision 3D Mapping Platform",
+    lifespan=lifespan,
 )
-
-# Create database tables
-create_tables()
-db = SessionLocal()
-seed_rules(db)
-db.close()
 
 app.add_middleware(
     CORSMiddleware,
