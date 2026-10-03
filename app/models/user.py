@@ -1,5 +1,4 @@
 from datetime import datetime
-
 from sqlalchemy import Column, Integer, String, DateTime
 from sqlalchemy.orm import relationship
 
@@ -7,7 +6,6 @@ from app.models.base import Base
 
 
 class User(Base):
-
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -37,6 +35,13 @@ class User(Base):
     # Relationship with Project table
     projects = relationship(
         "Project",
+        back_populates="user",
+        cascade="all, delete"
+    )
+
+    # Relationship with Notification table
+    notifications = relationship(
+        "Notification",
         back_populates="user",
         cascade="all, delete"
     )

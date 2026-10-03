@@ -1,5 +1,6 @@
 from .user import User
 from .project import Project
+from .notification import Notification
 from .rule_config import RuleConfig
 from .autodcr_models import (
     AutoDCRProject,
@@ -13,6 +14,7 @@ from .autodcr_models import (
 __all__ = [
     "User",
     "Project",
+    "Notification",
     "RuleConfig",
     "AutoDCRProject",
     "AutoDCRDrawing",

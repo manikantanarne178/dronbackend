@@ -15,6 +15,7 @@ from app.core.dependencies import get_current_user
 from app.core.colmap import get_colmap_diagnostics
 from app.core.config import settings
 from app.models.project import Project
+from app.models.notification import Notification
 from app.models.user import User
 from app.reconstruction.pipeline import run_pipeline, OUTPUTS
 
@@ -26,7 +27,6 @@ router = APIRouter(
 JOBS_DIR = OUTPUTS / "jobs"
 JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
-# In-memory registry for fast lookups
 JOBS_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 
@@ -61,19 +61,13 @@ class GenerateModelRequest(BaseModel):
 
 @router.get("/diagnostics")
 async def get_diagnostics():
-    """
-    Diagnostic endpoint to inspect photogrammetry engine and COLMAP resolution.
-    """
     return {
         "status": "online",
         "engine": get_colmap_diagnostics(),
     }
 
 
-def execute_reconstruction_task(job_id: str, upload_id: Optional[str], user_id: int):
-    """
-    Background worker function executing the photogrammetry pipeline.
-    """
+def execute_reconstruction_task(job_id: str, upload_id: Optional[str], user_id: int, project_name: Optional[str]):
     db = SessionLocal()
     try:
         def update_status(stage: str, message: str):
@@ -92,12 +86,38 @@ def execute_reconstruction_task(job_id: str, upload_id: Optional[str], user_id: 
         )
 
         project_id = result["project_id"]
+        stats = result.get("statistics", {})
 
         project = Project(
             project_id=project_id,
             user_id=user_id,
+            name=project_name or f"Survey {project_id}",
+            images_uploaded=stats.get("images_uploaded", 0),
+            processing_time=result.get("processing_time", 0.0),
+            status="COMPLETED",
+            width=stats.get("width", 0.0),
+            length=stats.get("length", 0.0),
+            height=stats.get("height", 0.0),
+            ground_area=stats.get("ground_area", 0.0),
+            surface_area=stats.get("surface_area", 0.0),
+            volume=stats.get("volume", 0.0),
+            vertices=stats.get("vertices", 0),
+            triangles=stats.get("triangles", 0),
+            model_url=f"/api/projects/{project_id}/model",
+            report_url=f"/api/report/download/{project_id}",
+            metadata_json=json.dumps(stats),
         )
         db.add(project)
+
+        # Add completion notification
+        notif = Notification(
+            user_id=user_id,
+            title="3D Reconstruction Completed",
+            message=f"3D Mesh model for project {project_id} has been generated successfully.",
+            type="success",
+            project_id=project_id,
+        )
+        db.add(notif)
         db.commit()
 
         final_state = {
@@ -109,7 +129,7 @@ def execute_reconstruction_task(job_id: str, upload_id: Optional[str], user_id: 
             "message": "3D reconstruction completed successfully.",
             "model_url": f"/api/projects/{project_id}/model",
             "report_url": f"/api/report/download/{project_id}",
-            "statistics": result.get("statistics", {}),
+            "statistics": stats,
             "processing_time": result.get("processing_time", 0.0),
             "completed_at": datetime.now().isoformat(),
         }
@@ -118,6 +138,18 @@ def execute_reconstruction_task(job_id: str, upload_id: Optional[str], user_id: 
     except Exception as e:
         db.rollback()
         print(f"[RECONSTRUCTION_JOB_FAILED] Job {job_id}: {e}")
+        try:
+            fail_notif = Notification(
+                user_id=user_id,
+                title="3D Reconstruction Failed",
+                message=f"Reconstruction failed: {str(e)}",
+                type="error",
+            )
+            db.add(fail_notif)
+            db.commit()
+        except Exception:
+            pass
+
         fail_state = {
             "job_id": job_id,
             "upload_id": upload_id,
@@ -142,6 +174,7 @@ async def generate_model(
     current_user: User = Depends(get_current_user),
 ):
     target_upload_id = (payload.upload_id if payload else None) or upload_id
+    proj_name = payload.project_name if payload else None
     req_id = (payload.request_id if payload else None) or f"REQ_{uuid.uuid4().hex[:6]}"
     job_id = f"JOB_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
@@ -156,15 +189,38 @@ async def generate_model(
     }
     save_job_state(job_id, initial_state)
 
-    print(f"[PIPELINE_JOB_CREATED] job_id={job_id} upload_id={target_upload_id} request_id={req_id}")
+    # Initial start notification
+    start_notif = Notification(
+        user_id=current_user.id,
+        title="3D Reconstruction Started",
+        message=f"Photogrammetry ingestion pipeline started for dataset ({job_id}).",
+        type="info",
+    )
+    db.add(start_notif)
+    db.commit()
 
     if sync:
-        # Synchronous execution mode
         try:
             result = await asyncio.to_thread(run_pipeline, upload_id=target_upload_id)
+            stats = result.get("statistics", {})
             project = Project(
                 project_id=result["project_id"],
                 user_id=current_user.id,
+                name=proj_name or f"Survey {result['project_id']}",
+                images_uploaded=stats.get("images_uploaded", 0),
+                processing_time=result.get("processing_time", 0.0),
+                status="COMPLETED",
+                width=stats.get("width", 0.0),
+                length=stats.get("length", 0.0),
+                height=stats.get("height", 0.0),
+                ground_area=stats.get("ground_area", 0.0),
+                surface_area=stats.get("surface_area", 0.0),
+                volume=stats.get("volume", 0.0),
+                vertices=stats.get("vertices", 0),
+                triangles=stats.get("triangles", 0),
+                model_url=f"/api/projects/{result['project_id']}/model",
+                report_url=f"/api/report/download/{result['project_id']}",
+                metadata_json=json.dumps(stats),
             )
             db.add(project)
             db.commit()
@@ -176,19 +232,19 @@ async def generate_model(
                 "project_id": result["project_id"],
                 "model_url": f"/api/projects/{result['project_id']}/model",
                 "report_url": f"/api/report/download/{result['project_id']}",
-                "statistics": result.get("statistics", {}),
+                "statistics": stats,
                 "processing_time": result.get("processing_time", 0.0),
             }
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail=f"3D Reconstruction failed: {str(e)}")
 
-    # Asynchronous non-blocking background execution
     background_tasks.add_task(
         execute_reconstruction_task,
         job_id=job_id,
         upload_id=target_upload_id,
         user_id=current_user.id,
+        project_name=proj_name,
     )
 
     return {
@@ -210,7 +266,7 @@ async def get_job_status(
     if not state:
         raise HTTPException(
             status_code=404,
-            detail=f"Job '{job_id}' not found. The server may have restarted or the job ID is invalid.",
+            detail=f"Job '{job_id}' not found.",
         )
     return state
 
@@ -237,7 +293,6 @@ async def get_model(
         )
 
     model_path = (settings.OUTPUT_DIR / "projects" / project_id / "model.glb").resolve()
-
     if not model_path.exists():
         fallback_path = Path("app/outputs/projects") / project_id / "model.glb"
         if fallback_path.exists():

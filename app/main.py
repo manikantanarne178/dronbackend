@@ -1,7 +1,8 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 
 from app.core.database import create_tables, SessionLocal
@@ -11,9 +12,11 @@ from app.route.home import router as home_router
 from app.route.upload import router as upload_router
 from app.route import reconstruction
 from app.route.analytics import router as analytics_router
+from app.route.autodcr.router import router as autodcr_router
 
 from app.controller.auth import router as auth_router
 from app.controller.projects import router as projects_router
+from app.controller.notifications import router as notifications_router
 from app.controller.report import router as report_router
 from app.route.gps import router as gps_router
 from app.route import report
@@ -23,11 +26,6 @@ logger = logging.getLogger("uvicorn.error")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    FastAPI Lifespan handler:
-    Initializes database tables, seeds default rule configurations,
-    and ensures default municipal admin account is configured.
-    """
     try:
         logger.info("Initializing database schema...")
         create_tables()
@@ -35,8 +33,8 @@ async def lifespan(app: FastAPI):
         try:
             seed_rules(db)
             logger.info("Default rule configurations verified/seeded.")
-            
-            # Seed / sync user Harini
+
+            # Seed / sync default test user Harini
             try:
                 from app.models.user import User
                 from app.core.security import hash_password
@@ -63,6 +61,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Startup database initialization warning: {e}")
     yield
+
 
 app = FastAPI(
     title="DroneVision API",
@@ -91,9 +90,6 @@ app.add_middleware(
 )
 
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
-
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"[GLOBAL_EXCEPTION] {request.method} {request.url}: {exc}", exc_info=True)
@@ -106,13 +102,8 @@ async def global_exception_handler(request: Request, exc: Exception):
         },
     )
 
-# ============================
 # Routers
-# ============================
 app.include_router(drawing_router)
-# AutoDCR Engine routes
-from app.route.autodcr.router import router as autodcr_router
-
 app.include_router(autodcr_router)
 app.include_router(home_router)
 app.include_router(upload_router)
@@ -120,13 +111,11 @@ app.include_router(reconstruction.router)
 app.include_router(analytics_router)
 app.include_router(report_router)
 app.include_router(projects_router)
+app.include_router(notifications_router)
 app.include_router(auth_router)
 app.include_router(gps_router)
 app.include_router(report.router)
 
-# ============================
-# Swagger File Upload Fix
-# ============================
 
 def _fix_file_formats(obj):
     if isinstance(obj, dict):
@@ -134,10 +123,8 @@ def _fix_file_formats(obj):
             obj.pop("contentMediaType", None)
             obj["type"] = "string"
             obj["format"] = "binary"
-
         for value in obj.values():
             _fix_file_formats(value)
-
     elif isinstance(obj, list):
         for item in obj:
             _fix_file_formats(item)
@@ -153,9 +140,7 @@ def custom_openapi():
         description=app.description,
         routes=app.routes,
     )
-
     components = openapi_schema.get("components", {}).get("schemas", {})
-
     for schema in components.values():
         _fix_file_formats(schema)
 
